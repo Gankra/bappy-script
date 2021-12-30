@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use nom::{
-  IResult, Parser, InputTakeAtPosition, AsChar,
-  branch::alt,
-  bytes::complete::{take_until, tag},
-  character::complete::{alphanumeric1, char, digit1, space0, space1},
-  combinator::{map, map_res},
-  error::ParseError,
-  multi::separated_list0,
+    branch::alt,
+    bytes::complete::{tag, take_until},
+    character::complete::{alphanumeric1, char, digit1, space0, space1},
+    combinator::{map, map_res},
+    error::ParseError,
+    multi::separated_list0,
+    AsChar, IResult, InputTakeAtPosition, Parser,
 };
 
 const MAIN_PROGRAM: &str = r#"
@@ -62,16 +62,13 @@ fn run(input: &str) -> i64 {
     let out = eval_program(&bin);
     println!("evaled!");
     print_val(&out);
-    
+
     if let Val::Int(int) = out {
         int
     } else {
         panic!("main must evaluate to an int!");
     }
 }
-
-
-
 
 #[derive(Debug, Clone)]
 struct Program<'p> {
@@ -88,27 +85,15 @@ struct Function<'p> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Stmt<'p> {
-    Let {
-        name: &'p str,
-        expr: Expr<'p>,
-    },
-    Func {
-        func: Function<'p>,
-    },    
-    Ret {
-        expr: Expr<'p>,
-    },
-    Print {
-        expr: Expr<'p>,
-    }
+    Let { name: &'p str, expr: Expr<'p> },
+    Func { func: Function<'p> },
+    Ret { expr: Expr<'p> },
+    Print { expr: Expr<'p> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Expr<'p> {
-    Call {
-        func: &'p str,
-        args: Vec<Expr<'p>>,
-    },
+    Call { func: &'p str, args: Vec<Expr<'p>> },
     Lit(Literal<'p>),
     Var(&'p str),
 }
@@ -118,17 +103,6 @@ enum Literal<'p> {
     Int(i64),
     Str(&'p str),
 }
-
-
-
-
-
-
-
-
-
-
-
 
 // Parse intermediates
 enum Item<'p> {
@@ -142,8 +116,11 @@ fn parse(i: &str) -> IResult<&str, Program> {
     Ok((i, Program { main }))
 }
 
-fn parse_func_body<'p>(mut i: &'p str, name: &'p str, args: Vec<&'p str>) 
-    -> IResult<&'p str, Function<'p>> {
+fn parse_func_body<'p>(
+    mut i: &'p str,
+    name: &'p str,
+    args: Vec<&'p str>,
+) -> IResult<&'p str, Function<'p>> {
     let mut stmts = Vec::new();
 
     loop {
@@ -166,23 +143,24 @@ fn parse_func_body<'p>(mut i: &'p str, name: &'p str, args: Vec<&'p str>)
                 stmts.push(stmt);
             }
             Item::End => {
-                return Ok((i, Function {
-                    name,
-                    args,
-                    stmts,
-                    // Captures are populated by the type checker
-                    captures: HashSet::new(),
-                }));
+                return Ok((
+                    i,
+                    Function {
+                        name,
+                        args,
+                        stmts,
+                        // Captures are populated by the type checker
+                        captures: HashSet::new(),
+                    },
+                ));
             }
         }
     }
 }
 
-
 fn item(i: &str) -> IResult<&str, Item> {
     alt((func, stmt, end))(i)
 }
-
 
 fn func(i: &str) -> IResult<&str, Item> {
     let (i, _) = tag("fn")(i)?;
@@ -200,17 +178,13 @@ fn func(i: &str) -> IResult<&str, Item> {
 }
 
 fn stmt(i: &str) -> IResult<&str, Item> {
-    map(
-        alt((stmt_let, stmt_ret, stmt_print)),
-        Item::Stmt
-    )(i)
+    map(alt((stmt_let, stmt_ret, stmt_print)), Item::Stmt)(i)
 }
 
 fn end(i: &str) -> IResult<&str, Item> {
     let (i, _) = tag("}")(i)?;
     Ok((i, Item::End))
 }
-
 
 fn stmt_let(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = tag("let")(i)?;
@@ -272,18 +246,16 @@ fn expr_lit_str(i: &str) -> IResult<&str, Literal> {
     map(digit1, Literal::Str)(i)
 }
 
-
 fn ident(i: &str) -> IResult<&str, &str> {
     alphanumeric1(i)
 }
 
-pub fn padded<F, T, O, E>(
-    mut parser: F, 
-) -> impl FnMut(T) -> IResult<T, O, E> where
+pub fn padded<F, T, O, E>(mut parser: F) -> impl FnMut(T) -> IResult<T, O, E>
+where
     F: Parser<T, O, E>,
     T: InputTakeAtPosition,
     E: ParseError<T>,
-    <T as InputTakeAtPosition>::Item: AsChar + Clone, 
+    <T as InputTakeAtPosition>::Item: AsChar + Clone,
 {
     move |i| {
         let (i, _) = space0(i)?;
@@ -293,13 +265,6 @@ pub fn padded<F, T, O, E>(
         Ok((i, val))
     }
 }
-
-
-
-
-
-
-
 
 struct CheckEnv<'p> {
     vars: HashMap<&'p str, ()>,
@@ -336,11 +301,7 @@ fn check_func<'p>(func: &mut Function<'p>, envs: &mut Vec<CheckEnv<'p>>) {
     envs.pop();
 }
 
-fn check_expr<'p>(
-    expr: &Expr<'p>, 
-    envs: &mut Vec<CheckEnv<'p>>, 
-    captures: &mut HashSet<&'p str>
-){
+fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut HashSet<&'p str>) {
     match expr {
         Expr::Lit(..) => {
             // Always valid
@@ -366,15 +327,6 @@ fn check_expr<'p>(
     }
 }
 
-
-
-
-
-
-
-
-
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Val<'p> {
     Int(i64),
@@ -399,29 +351,34 @@ fn eval_program<'p>(program: &'p Program<'p>) -> Val<'p> {
 }
 
 fn eval_func<'p>(
-    func: &'p Function<'p>, 
-    args: Vec<Val<'p>>, 
-    captures: HashMap<&'p str, Val<'p>>, 
+    func: &'p Function<'p>,
+    args: Vec<Val<'p>>,
+    captures: HashMap<&'p str, Val<'p>>,
     envs: &mut Vec<Env<'p>>,
 ) -> Val<'p> {
-    assert!(func.args.len() == args.len(), 
-        "mismatched argument count for fn {} (expected {}, got {})", 
+    assert!(
+        func.args.len() == args.len(),
+        "mismatched argument count for fn {} (expected {}, got {})",
         func.name,
         func.args.len(),
         args.len(),
     );
 
-    let mut vals = func.args.iter().copied().zip(args.into_iter()).collect::<HashMap<_,_>>();
-    assert!(vals.len() == func.args.len(),
-        "duplicate arg names for fn {}", 
+    let mut vals = func
+        .args
+        .iter()
+        .copied()
+        .zip(args.into_iter())
+        .collect::<HashMap<_, _>>();
+    assert!(
+        vals.len() == func.args.len(),
+        "duplicate arg names for fn {}",
         func.name,
     );
 
     vals.extend(captures.into_iter());
 
-    envs.push(Env {
-        vals,
-    });
+    envs.push(Env { vals });
 
     for stmt in &func.stmts {
         match stmt {
@@ -430,15 +387,16 @@ fn eval_func<'p>(
                 envs.last_mut().unwrap().vals.insert(*name, val);
             }
             Stmt::Func { func } => {
-                let captures = func.captures
+                let captures = func
+                    .captures
                     .iter()
                     .map(|&var| (var, eval_resolve_var(var, envs)))
                     .collect();
 
-                envs.last_mut().unwrap().vals.insert(func.name, Val::Func(Closure {
-                    captures,
-                    func,
-                }));
+                envs.last_mut()
+                    .unwrap()
+                    .vals
+                    .insert(func.name, Val::Func(Closure { captures, func }));
             }
             Stmt::Print { expr } => {
                 let val = eval_expr(expr, envs);
@@ -452,29 +410,25 @@ fn eval_func<'p>(
         }
     }
 
-    panic!("Ran out of statements to evaulate for function {}", func.name);
+    panic!(
+        "Ran out of statements to evaulate for function {}",
+        func.name
+    );
 }
 
 fn eval_expr<'p>(expr: &'p Expr<'p>, envs: &mut Vec<Env<'p>>) -> Val<'p> {
     match expr {
         Expr::Call { func, args } => {
             let closure = eval_resolve_func(func, envs);
-            let evaled_args = args
-                .iter()
-                .map(|expr| eval_expr(expr, envs))
-                .collect();
+            let evaled_args = args.iter().map(|expr| eval_expr(expr, envs)).collect();
 
             eval_func(closure.func, evaled_args, closure.captures, envs)
         }
-        Expr::Var(var) => {
-            eval_resolve_var(var, envs)
-        }
-        Expr::Lit(lit) => {
-            match lit {
-                Literal::Int(int) => Val::Int(*int),
-                Literal::Str(string) => Val::Str(*string),
-            }
-        }
+        Expr::Var(var) => eval_resolve_var(var, envs),
+        Expr::Lit(lit) => match lit {
+            Literal::Int(int) => Val::Int(*int),
+            Literal::Str(string) => Val::Str(*string),
+        },
     }
 }
 
@@ -489,12 +443,11 @@ fn eval_resolve_func<'p>(func: &'p str, envs: &mut Vec<Env<'p>>) -> Closure<'p> 
 fn eval_resolve_var<'p>(var: &'p str, envs: &mut Vec<Env<'p>>) -> Val<'p> {
     for env in envs.iter().rev() {
         if let Some(val) = env.vals.get(var) {
-            return val.clone()
+            return val.clone();
         }
     }
     panic!("Use of undefined var: {}", var);
 }
-
 
 fn print_val(val: &Val) {
     match val {
@@ -509,9 +462,6 @@ fn print_val(val: &Val) {
         }
     }
 }
-
-
-
 
 #[cfg(test)]
 mod test {
@@ -576,9 +526,6 @@ mod test {
         let result = run(program);
         assert_eq!(result, 666);
     }
-       
-        
-
 
     #[test]
     fn test_captures() {
@@ -652,6 +599,4 @@ mod test {
         let result = run(program);
         assert_eq!(result, 99);
     }
-
-
 }

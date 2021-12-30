@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nom::{
   IResult, Parser, InputTakeAtPosition, AsChar,
@@ -67,22 +67,27 @@ fn run(input: &str) -> i64 {
 
 
 
-
+#[derive(Debug, Clone)]
 struct Program<'p> {
     main: Function<'p>,
 }
 
+#[derive(Debug, Clone)]
 struct Function<'p> {
     name: &'p str,
     args: Vec<&'p str>,
-    funcs: HashMap<&'p str, Function<'p>>,
     stmts: Vec<Stmt<'p>>,
+    captures: HashSet<&'p str>,
 }
 
+#[derive(Debug, Clone)]
 enum Stmt<'p> {
     Let {
         name: &'p str,
         expr: Expr<'p>,
+    },
+    Func {
+        func: Function<'p>,
     },    
     Ret {
         expr: Expr<'p>,
@@ -92,6 +97,7 @@ enum Stmt<'p> {
     }
 }
 
+#[derive(Debug, Clone)]
 enum Expr<'p> {
     Call {
         func: &'p str,
@@ -100,10 +106,18 @@ enum Expr<'p> {
     Val(Val<'p>),
 }
 
+#[derive(Debug, Clone)]
 enum Val<'p> {
     Lit(i64),
     Var(&'p str),
 }
+
+
+
+
+
+
+
 
 
 
@@ -115,17 +129,6 @@ enum Item<'p> {
     End,
 }
 
-
-
-
-
-
-
-
-
-
-
-
 fn parse(i: &str) -> IResult<&str, Program> {
     let (i, main) = parse_func_body(i, "main", Vec::new())?;
     Ok((i, Program { main }))
@@ -133,7 +136,6 @@ fn parse(i: &str) -> IResult<&str, Program> {
 
 fn parse_func_body<'p>(mut i: &'p str, name: &'p str, args: Vec<&'p str>) 
     -> IResult<&'p str, Function<'p>> {
-    let mut funcs = HashMap::new();
     let mut stmts = Vec::new();
 
     loop {
@@ -150,8 +152,7 @@ fn parse_func_body<'p>(mut i: &'p str, name: &'p str, args: Vec<&'p str>)
             Item::Func(name, args) => {
                 let (new_i, func) = parse_func_body(i, name, args)?;
                 i = new_i;
-                let old = funcs.insert(name, func);
-                assert!(old.is_none(), "Duplicate function name: {}", name);
+                stmts.push(Stmt::Func { func });
             }
             Item::Stmt(stmt) => {
                 stmts.push(stmt);
@@ -160,8 +161,9 @@ fn parse_func_body<'p>(mut i: &'p str, name: &'p str, args: Vec<&'p str>)
                 return Ok((i, Function {
                     name,
                     args,
-                    funcs,
                     stmts,
+                    // Captures are populated by the type checker
+                    captures: HashSet::new(),
                 }));
             }
         }
@@ -289,16 +291,68 @@ pub fn padded<F, T, O, E>(
 
 
 
-
+struct CheckEnv<'p> {
+    vars: HashMap<&'p str, ()>,
+}
 
 fn check(mut program: Program) -> Program {
-    check_func(&mut program.main);
+    let mut envs = Vec::new();
+    check_func(&mut program.main, &mut envs);
     program
 }
 
-fn check_func(func: &mut Function) {
-    for stmt in &func.stmts {
+fn check_func<'p>(func: &mut Function<'p>, envs: &mut Vec<CheckEnv<'p>>) {
+    let vars = func.args.iter().map(|&name| (name, ())).collect();
+    envs.push(CheckEnv { vars });
+    let mut captures = HashSet::new();
 
+    for stmt in &mut func.stmts {
+        match stmt {
+            Stmt::Let { name, expr } => {
+                check_expr(expr, envs, &mut captures);
+                envs.last_mut().unwrap().vars.insert(name, ());
+            }
+            Stmt::Func { func } => {
+                // envs.last_mut().unwrap().vars.insert(func.name, ());
+                check_func(func, envs);
+            }
+            Stmt::Ret { expr } | Stmt::Print { expr } => {
+                check_expr(expr, envs, &mut captures);
+            }
+        }
+    }
+
+    func.captures = captures;
+    envs.pop();
+}
+
+fn check_expr<'p>(
+    expr: &Expr<'p>, 
+    envs: &mut Vec<CheckEnv<'p>>, 
+    captures: &mut HashSet<&'p str>
+){
+    match expr {
+        Expr::Val(Val::Lit(_)) => {
+            // Always valid
+        }
+        Expr::Val(Val::Var(var_name)) => {
+            for (depth, env) in envs.iter().rev().enumerate() {
+                if env.vars.get(var_name).is_some() {
+                    if depth == 0 {
+                        // Do nothing, not a capture
+                    } else {
+                        captures.insert(var_name);
+                    }
+                    return;
+                }
+            }
+            panic!("Compile Error: Use of undefined variable {}", var_name);
+        }
+        Expr::Call { func, args } => {
+            for expr in args {
+                check_expr(expr, envs, captures);
+            }
+        }
     }
 }
 
@@ -312,20 +366,29 @@ fn check_func(func: &mut Function) {
 
 
 
+#[derive(Debug, Clone)]
+struct Closure<'p> {
+    func: &'p Function<'p>,
+    captures: HashMap<&'p str, i64>,
+}
 
-
-
+#[derive(Debug, Clone)]
 struct Env<'p> {
     vals: HashMap<&'p str, i64>,
-    funcs: &'p HashMap<&'p str, Function<'p>>,
+    funcs: HashMap<&'p str, Closure<'p>>,
 }
 
 fn eval_program(program: Program) -> i64 {
     let mut envs = Vec::new();
-    eval_func(&program.main, Vec::new(), &mut envs)
+    eval_func(&program.main, Vec::new(), HashMap::new(), &mut envs)
 }
 
-fn eval_func<'p>(func: &'p Function<'p>, args: Vec<i64>, envs: &mut Vec<Env<'p>>) -> i64 {
+fn eval_func<'p>(
+    func: &'p Function<'p>, 
+    args: Vec<i64>, 
+    captures: HashMap<&'p str, i64>, 
+    envs: &mut Vec<Env<'p>>,
+) -> i64 {
     assert!(func.args.len() == args.len(), 
         "mismatched argument count for fn {} (expected {}, got {})", 
         func.name,
@@ -333,15 +396,17 @@ fn eval_func<'p>(func: &'p Function<'p>, args: Vec<i64>, envs: &mut Vec<Env<'p>>
         args.len(),
     );
 
-    let vals = func.args.iter().copied().zip(args.into_iter()).collect::<HashMap<_,_>>();
+    let mut vals = func.args.iter().copied().zip(args.into_iter()).collect::<HashMap<_,_>>();
     assert!(vals.len() == func.args.len(),
         "duplicate arg names for fn {}", 
         func.name,
     );
 
+    vals.extend(captures.into_iter());
+
     envs.push(Env {
         vals,
-        funcs: &func.funcs,
+        funcs: HashMap::new(),
     });
 
     for stmt in &func.stmts {
@@ -349,6 +414,17 @@ fn eval_func<'p>(func: &'p Function<'p>, args: Vec<i64>, envs: &mut Vec<Env<'p>>
             Stmt::Let { name, expr } => {
                 let val = eval_expr(expr, envs);
                 envs.last_mut().unwrap().vals.insert(*name, val);
+            }
+            Stmt::Func { func } => {
+                let captures = func.captures
+                    .iter()
+                    .map(|&var| (var, eval_var(var, envs)))
+                    .collect();
+
+                envs.last_mut().unwrap().funcs.insert(func.name, Closure {
+                    captures,
+                    func,
+                });
             }
             Stmt::Print { expr } => {
                 let val = eval_expr(expr, envs);
@@ -368,13 +444,13 @@ fn eval_func<'p>(func: &'p Function<'p>, args: Vec<i64>, envs: &mut Vec<Env<'p>>
 fn eval_expr<'p>(expr: &'p Expr<'p>, envs: &mut Vec<Env<'p>>) -> i64 {
     match expr {
         Expr::Call { func, args } => {
-            let func = eval_resolve_func(func, envs);
+            let closure = eval_resolve_func(func, envs);
             let evaled_args = args
                 .iter()
                 .map(|expr| eval_expr(expr, envs))
                 .collect();
 
-            eval_func(func, evaled_args, envs)
+            eval_func(closure.func, evaled_args, closure.captures, envs)
         }
         Expr::Val(val) => {
             eval_val(val, envs)
@@ -384,22 +460,24 @@ fn eval_expr<'p>(expr: &'p Expr<'p>, envs: &mut Vec<Env<'p>>) -> i64 {
 
 fn eval_val(val: &Val, envs: &mut Vec<Env>) -> i64 {
     match val {
-        Val::Var(name) => {
-            for env in envs.iter().rev() {
-                if let Some(val) = env.vals.get(name) {
-                    return *val;
-                }
-            }
-            panic!("Tried to get value of undefined var {}", name);
-        }
+        Val::Var(name) => eval_var(name, envs),
         Val::Lit(int) => *int,
     }
 }
 
-fn eval_resolve_func<'p>(func: &'p str, envs: &mut Vec<Env<'p>>) -> &'p Function<'p> {
+fn eval_var(var: &str, envs: &mut Vec<Env>) -> i64 {
+    for env in envs.iter().rev() {
+        if let Some(val) = env.vals.get(var) {
+            return *val;
+        }
+    }
+    panic!("Tried to get value of undefined var {}", var);
+}
+
+fn eval_resolve_func<'a, 'p>(func: &'p str, envs: &mut Vec<Env<'p>>) -> Closure<'p> {
     for env in envs.iter().rev() {
         if let Some(func) = env.funcs.get(func) {
-            return func
+            return func.clone()
         }
     }
     panic!("Could not resolve function name: {}", func);
@@ -419,7 +497,6 @@ mod test {
 
     // TODO: this fails, it shouldn't
     #[test]
-    #[should_panic]
     fn test_captures() {
         let program = r#"
             let shadowed = 66

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use nom::{
     branch::alt,
@@ -11,38 +12,26 @@ use nom::{
 };
 
 const MAIN_PROGRAM: &str = r#"
-    fn x(a, b, c) {
-        fn sub(e, f) {
-            print c
-            ret f
-        } 
-        ret sub(a, b)
+    fn true(if, else) {
+        ret if()
+    }
+    fn false(if, else) {
+        ret else()
     }
 
-    fn y(z) {
-        ret z
+    let condition = true
+    let capture = 69
+
+    fn printTrue() {
+        print 1
+        ret add(capture, 1)
+    }
+    fn printFalse() {
+        print 0
+        ret add(capture, 0)
     }
 
-    let val1 = 16
-    let val2 = x(1, 99, 12)
-    let val3 = 21
-
-    let result = x(7, x(val3 , y(x(2, val2, 7)), 8 ), 1)
-
-    let shadowed = 66
-    fn captures() {
-        ret shadowed
-    }
-    fn mask(shadowed) {
-        ret captures()
-    }
-
-
-
-    print 777777777
-    print mask(33)
-
-    ret result
+    ret condition(printTrue, printFalse)
 }
 
 "#;
@@ -51,16 +40,74 @@ fn main() {
     run(MAIN_PROGRAM);
 }
 
+fn builtin_add<'p>(args: &[Val<'p>]) -> Val<'p> {
+    assert!(args.len() == 2, "Builtin [add]: wrong number of args");
+    if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
+        Val::Int(lhs + rhs)
+    } else {
+        panic!("Builtin [add]: wrong type of args")
+    }
+}
+
+fn builtin_mul<'p>(args: &[Val<'p>]) -> Val<'p> {
+    assert!(args.len() == 2, "Builtin [mul]: wrong number of args");
+    if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
+        Val::Int(lhs * rhs)
+    } else {
+        panic!("Builtin [mul]: wrong type of args")
+    }
+}
+
+fn builtin_sub<'p>(args: &[Val<'p>]) -> Val<'p> {
+    assert!(args.len() == 2, "Builtin [sub]: wrong number of args");
+    if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
+        Val::Int(lhs - rhs)
+    } else {
+        panic!("Builtin [sub]: wrong type of args")
+    }
+}
+
+fn builtins() -> &'static [(&'static str, Builtin)] {
+    &[
+        (
+            "add",
+            Builtin {
+                args: &["lhs", "rhs"],
+                func: builtin_add,
+            },
+        ),
+        (
+            "sub",
+            Builtin {
+                args: &["lhs", "rhs"],
+                func: builtin_sub,
+            },
+        ),
+        (
+            "mul",
+            Builtin {
+                args: &["lhs", "rhs"],
+                func: builtin_mul,
+            },
+        ),
+    ]
+}
+
 fn run(input: &str) -> i64 {
     println!("parsing...");
-    let (_, bin) = parse(input).unwrap();
+    let (_, mut bin) = parse(input).unwrap();
     println!("parsed!\n");
+
+    bin.builtins = builtins();
+
     println!("checking...");
     let bin = check(bin);
     println!("checked!\n");
+
     println!("evaling...");
     let out = eval_program(&bin);
     println!("evaled!");
+
     print_val(&out);
 
     if let Val::Int(int) = out {
@@ -70,12 +117,35 @@ fn run(input: &str) -> i64 {
     }
 }
 
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+
 #[derive(Debug, Clone)]
 struct Program<'p> {
     main: Function<'p>,
+    builtins: &'static [(&'static str, Builtin)],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct Function<'p> {
     name: &'p str,
     args: Vec<&'p str>,
@@ -83,7 +153,19 @@ struct Function<'p> {
     captures: HashSet<&'p str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
+struct Builtin {
+    args: &'static [&'static str],
+    func: for<'p> fn(args: &[Val<'p>]) -> Val<'p>,
+}
+
+impl fmt::Debug for Builtin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<builtin>")
+    }
+}
+
+#[derive(Debug, Clone)]
 enum Stmt<'p> {
     Let { name: &'p str, expr: Expr<'p> },
     Func { func: Function<'p> },
@@ -91,14 +173,14 @@ enum Stmt<'p> {
     Print { expr: Expr<'p> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum Expr<'p> {
     Call { func: &'p str, args: Vec<Expr<'p>> },
     Lit(Literal<'p>),
     Var(&'p str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum Literal<'p> {
     Int(i64),
     Str(&'p str),
@@ -113,7 +195,13 @@ enum Item<'p> {
 
 fn parse(i: &str) -> IResult<&str, Program> {
     let (i, main) = parse_func_body(i, "main", Vec::new())?;
-    Ok((i, Program { main }))
+    Ok((
+        i,
+        Program {
+            main,
+            builtins: &[],
+        },
+    ))
 }
 
 fn parse_func_body<'p>(
@@ -266,12 +354,39 @@ where
     }
 }
 
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+
 struct CheckEnv<'p> {
     vars: HashMap<&'p str, ()>,
 }
 
 fn check(mut program: Program) -> Program {
-    let mut envs = Vec::new();
+    let builtins = program
+        .builtins
+        .iter()
+        .map(|(name, _)| (*name, ()))
+        .collect();
+    let mut envs = vec![CheckEnv { vars: builtins }];
     check_func(&mut program.main, &mut envs);
     program
 }
@@ -319,7 +434,7 @@ fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut 
             }
             panic!("Compile Error: Use of undefined variable {}", var_name);
         }
-        Expr::Call { func, args } => {
+        Expr::Call { args, .. } => {
             for expr in args {
                 check_expr(expr, envs, captures);
             }
@@ -327,14 +442,37 @@ fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+
+#[derive(Debug, Clone)]
 enum Val<'p> {
     Int(i64),
     Str(&'p str),
     Func(Closure<'p>),
+    Builtin(Builtin),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct Closure<'p> {
     func: &'p Function<'p>,
     captures: HashMap<&'p str, Val<'p>>,
@@ -346,7 +484,12 @@ struct Env<'p> {
 }
 
 fn eval_program<'p>(program: &'p Program<'p>) -> Val<'p> {
-    let mut envs = Vec::new();
+    let builtins = program
+        .builtins
+        .iter()
+        .map(|(name, builtin)| (*name, Val::Builtin(builtin.clone())))
+        .collect();
+    let mut envs = vec![Env { vals: builtins }];
     eval_func(&program.main, Vec::new(), HashMap::new(), &mut envs)
 }
 
@@ -418,25 +561,26 @@ fn eval_func<'p>(
 
 fn eval_expr<'p>(expr: &'p Expr<'p>, envs: &mut Vec<Env<'p>>) -> Val<'p> {
     match expr {
-        Expr::Call { func, args } => {
-            let closure = eval_resolve_func(func, envs);
+        Expr::Call {
+            func: func_name,
+            args,
+        } => {
+            let func = eval_resolve_var(func_name, envs);
             let evaled_args = args.iter().map(|expr| eval_expr(expr, envs)).collect();
 
-            eval_func(closure.func, evaled_args, closure.captures, envs)
+            match func {
+                Val::Func(closure) => eval_func(closure.func, evaled_args, closure.captures, envs),
+                Val::Builtin(builtin) => (builtin.func)(&evaled_args),
+                _ => {
+                    panic!("Tried to call a non-function: {}", func_name);
+                }
+            }
         }
         Expr::Var(var) => eval_resolve_var(var, envs),
         Expr::Lit(lit) => match lit {
             Literal::Int(int) => Val::Int(*int),
             Literal::Str(string) => Val::Str(*string),
         },
-    }
-}
-
-fn eval_resolve_func<'p>(func: &'p str, envs: &mut Vec<Env<'p>>) -> Closure<'p> {
-    if let Val::Func(func) = eval_resolve_var(func, envs) {
-        func
-    } else {
-        panic!("Tried to call a non-function: {}", func);
     }
 }
 
@@ -460,12 +604,26 @@ fn print_val(val: &Val) {
         Val::Func(func) => {
             println!("fn {}", func.func.name);
         }
+        Val::Builtin(..) => {
+            println!("<builtin>");
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::run;
+
+    #[test]
+    fn test_builtin_math() {
+        let program = r#"
+            ret sub(mul(add(4, 7), 13), 9)
+        }
+        "#;
+
+        let result = run(program);
+        assert_eq!(result, (4 + 7) * 13 - 9);
+    }
 
     #[test]
     fn test_first_class_basic() {

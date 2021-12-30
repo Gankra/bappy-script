@@ -59,9 +59,15 @@ fn run(input: &str) -> i64 {
     let bin = check(bin);
     println!("checked!\n");
     println!("evaling...");
-    let out = eval_program(bin);
-    println!("evaled! {}", out);
-    out
+    let out = eval_program(&bin);
+    println!("evaled!");
+    print_val(&out);
+    
+    if let Val::Int(int) = out {
+        int
+    } else {
+        panic!("main must evaluate to an int!");
+    }
 }
 
 
@@ -72,7 +78,7 @@ struct Program<'p> {
     main: Function<'p>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Function<'p> {
     name: &'p str,
     args: Vec<&'p str>,
@@ -80,7 +86,7 @@ struct Function<'p> {
     captures: HashSet<&'p str>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Stmt<'p> {
     Let {
         name: &'p str,
@@ -97,20 +103,22 @@ enum Stmt<'p> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Expr<'p> {
     Call {
         func: &'p str,
         args: Vec<Expr<'p>>,
     },
-    Val(Val<'p>),
-}
-
-#[derive(Debug, Clone)]
-enum Val<'p> {
-    Lit(i64),
+    Lit(Literal<'p>),
     Var(&'p str),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Literal<'p> {
+    Int(i64),
+    Str(&'p str),
+}
+
 
 
 
@@ -233,7 +241,7 @@ fn stmt_print(i: &str) -> IResult<&str, Stmt> {
 }
 
 fn expr(i: &str) -> IResult<&str, Expr> {
-    alt((expr_call, expr_val))(i)
+    alt((expr_call, expr_lit, expr_var))(i)
 }
 
 fn expr_call(i: &str) -> IResult<&str, Expr> {
@@ -247,21 +255,23 @@ fn expr_call(i: &str) -> IResult<&str, Expr> {
     Ok((i, Expr::Call { func, args }))
 }
 
-fn expr_val(i: &str) -> IResult<&str, Expr> {
-    map(val, Expr::Val)(i)
+fn expr_var(i: &str) -> IResult<&str, Expr> {
+    map(ident, Expr::Var)(i)
 }
 
-fn val(i: &str) -> IResult<&str, Val> {
-    alt((val_lit, val_var))(i)
+fn expr_lit(i: &str) -> IResult<&str, Expr> {
+    map(alt((expr_lit_int,)), Expr::Lit)(i)
 }
 
-fn val_var(i: &str) -> IResult<&str, Val> {
-    map(ident, Val::Var)(i)
+fn expr_lit_int(i: &str) -> IResult<&str, Literal> {
+    map(map_res(digit1, |s: &str| s.parse::<i64>()), Literal::Int)(i)
 }
 
-fn val_lit(i: &str) -> IResult<&str, Val> {
-    map(map_res(digit1, |s: &str| s.parse::<i64>()), Val::Lit)(i)
+fn expr_lit_str(i: &str) -> IResult<&str, Literal> {
+    // unimplemented!
+    map(digit1, Literal::Str)(i)
 }
+
 
 fn ident(i: &str) -> IResult<&str, &str> {
     alphanumeric1(i)
@@ -313,7 +323,7 @@ fn check_func<'p>(func: &mut Function<'p>, envs: &mut Vec<CheckEnv<'p>>) {
                 envs.last_mut().unwrap().vars.insert(name, ());
             }
             Stmt::Func { func } => {
-                // envs.last_mut().unwrap().vars.insert(func.name, ());
+                envs.last_mut().unwrap().vars.insert(func.name, ());
                 check_func(func, envs);
             }
             Stmt::Ret { expr } | Stmt::Print { expr } => {
@@ -332,10 +342,10 @@ fn check_expr<'p>(
     captures: &mut HashSet<&'p str>
 ){
     match expr {
-        Expr::Val(Val::Lit(_)) => {
+        Expr::Lit(..) => {
             // Always valid
         }
-        Expr::Val(Val::Var(var_name)) => {
+        Expr::Var(var_name) => {
             for (depth, env) in envs.iter().rev().enumerate() {
                 if env.vars.get(var_name).is_some() {
                     if depth == 0 {
@@ -365,30 +375,35 @@ fn check_expr<'p>(
 
 
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Val<'p> {
+    Int(i64),
+    Str(&'p str),
+    Func(Closure<'p>),
+}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Closure<'p> {
     func: &'p Function<'p>,
-    captures: HashMap<&'p str, i64>,
+    captures: HashMap<&'p str, Val<'p>>,
 }
 
 #[derive(Debug, Clone)]
 struct Env<'p> {
-    vals: HashMap<&'p str, i64>,
-    funcs: HashMap<&'p str, Closure<'p>>,
+    vals: HashMap<&'p str, Val<'p>>,
 }
 
-fn eval_program(program: Program) -> i64 {
+fn eval_program<'p>(program: &'p Program<'p>) -> Val<'p> {
     let mut envs = Vec::new();
     eval_func(&program.main, Vec::new(), HashMap::new(), &mut envs)
 }
 
 fn eval_func<'p>(
     func: &'p Function<'p>, 
-    args: Vec<i64>, 
-    captures: HashMap<&'p str, i64>, 
+    args: Vec<Val<'p>>, 
+    captures: HashMap<&'p str, Val<'p>>, 
     envs: &mut Vec<Env<'p>>,
-) -> i64 {
+) -> Val<'p> {
     assert!(func.args.len() == args.len(), 
         "mismatched argument count for fn {} (expected {}, got {})", 
         func.name,
@@ -406,7 +421,6 @@ fn eval_func<'p>(
 
     envs.push(Env {
         vals,
-        funcs: HashMap::new(),
     });
 
     for stmt in &func.stmts {
@@ -418,17 +432,17 @@ fn eval_func<'p>(
             Stmt::Func { func } => {
                 let captures = func.captures
                     .iter()
-                    .map(|&var| (var, eval_var(var, envs)))
+                    .map(|&var| (var, eval_resolve_var(var, envs)))
                     .collect();
 
-                envs.last_mut().unwrap().funcs.insert(func.name, Closure {
+                envs.last_mut().unwrap().vals.insert(func.name, Val::Func(Closure {
                     captures,
                     func,
-                });
+                }));
             }
             Stmt::Print { expr } => {
                 let val = eval_expr(expr, envs);
-                println!("{}", val);
+                print_val(&val);
             }
             Stmt::Ret { expr } => {
                 let val = eval_expr(expr, envs);
@@ -441,7 +455,7 @@ fn eval_func<'p>(
     panic!("Ran out of statements to evaulate for function {}", func.name);
 }
 
-fn eval_expr<'p>(expr: &'p Expr<'p>, envs: &mut Vec<Env<'p>>) -> i64 {
+fn eval_expr<'p>(expr: &'p Expr<'p>, envs: &mut Vec<Env<'p>>) -> Val<'p> {
     match expr {
         Expr::Call { func, args } => {
             let closure = eval_resolve_func(func, envs);
@@ -452,41 +466,49 @@ fn eval_expr<'p>(expr: &'p Expr<'p>, envs: &mut Vec<Env<'p>>) -> i64 {
 
             eval_func(closure.func, evaled_args, closure.captures, envs)
         }
-        Expr::Val(val) => {
-            eval_val(val, envs)
+        Expr::Var(var) => {
+            eval_resolve_var(var, envs)
+        }
+        Expr::Lit(lit) => {
+            match lit {
+                Literal::Int(int) => Val::Int(*int),
+                Literal::Str(string) => Val::Str(*string),
+            }
         }
     }
 }
 
-fn eval_val(val: &Val, envs: &mut Vec<Env>) -> i64 {
-    match val {
-        Val::Var(name) => eval_var(name, envs),
-        Val::Lit(int) => *int,
+fn eval_resolve_func<'p>(func: &'p str, envs: &mut Vec<Env<'p>>) -> Closure<'p> {
+    if let Val::Func(func) = eval_resolve_var(func, envs) {
+        func
+    } else {
+        panic!("Tried to call a non-function: {}", func);
     }
 }
 
-fn eval_var(var: &str, envs: &mut Vec<Env>) -> i64 {
+fn eval_resolve_var<'p>(var: &'p str, envs: &mut Vec<Env<'p>>) -> Val<'p> {
     for env in envs.iter().rev() {
         if let Some(val) = env.vals.get(var) {
-            return *val;
+            return val.clone()
         }
     }
-    panic!("Tried to get value of undefined var {}", var);
-}
-
-fn eval_resolve_func<'a, 'p>(func: &'p str, envs: &mut Vec<Env<'p>>) -> Closure<'p> {
-    for env in envs.iter().rev() {
-        if let Some(func) = env.funcs.get(func) {
-            return func.clone()
-        }
-    }
-    panic!("Could not resolve function name: {}", func);
+    panic!("Use of undefined var: {}", var);
 }
 
 
-
-
-
+fn print_val(val: &Val) {
+    match val {
+        Val::Int(int) => {
+            println!("{}", int);
+        }
+        Val::Str(string) => {
+            println!("{}", string);
+        }
+        Val::Func(func) => {
+            println!("fn {}", func.func.name);
+        }
+    }
+}
 
 
 
@@ -495,20 +517,18 @@ fn eval_resolve_func<'a, 'p>(func: &'p str, envs: &mut Vec<Env<'p>>) -> Closure<
 mod test {
     use super::run;
 
-    // TODO: this fails, it shouldn't
     #[test]
-    #[should_panic]
     fn test_first_class_basic() {
         let program = r#"
             let capture = 123
-            fn do_it() {
+            fn doit() {
                 ret capture
             }
             fn higher(func) {
-                func()
+                ret func()
             }
 
-            ret higher(do_it)
+            ret higher(doit)
         }
         "#;
 
@@ -516,20 +536,18 @@ mod test {
         assert_eq!(result, 123);
     }
 
-    // TODO: this fails, it shouldn't
     #[test]
-    #[should_panic]
     fn test_first_class_with_args() {
         let program = r#"
-            let capture = 123;
-            fn do_it(x, y) {
+            let capture = 123
+            fn doit(x, y) {
                 ret x
             }
             fn higher(func) {
-                func(777, 999)
+                ret func(777, 999)
             }
 
-            ret higher(do_it)
+            ret higher(doit)
         }
         "#;
 
@@ -537,23 +555,21 @@ mod test {
         assert_eq!(result, 777);
     }
 
-    // TODO: this fails, it shouldn't
     #[test]
-    #[should_panic]
     fn test_first_class_with_captures() {
         let program = r#"
             let capture = 666
-            fn captured_func() {
+            fn capturedfunc() {
                 ret capture
             }
-            fn do_it(x, y) {
-                ret captured_func()
+            fn doit(x, y) {
+                ret capturedfunc()
             }
             fn higher(func) {
-                func(777, 999)
+                ret func(777, 999)
             }
 
-            ret higher(do_it)
+            ret higher(doit)
         }
         "#;
 
@@ -564,7 +580,6 @@ mod test {
         
 
 
-    // TODO: this fails, it shouldn't
     #[test]
     fn test_captures() {
         let program = r#"

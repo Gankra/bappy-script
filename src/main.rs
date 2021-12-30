@@ -497,6 +497,75 @@ mod test {
 
     // TODO: this fails, it shouldn't
     #[test]
+    #[should_panic]
+    fn test_first_class_basic() {
+        let program = r#"
+            let capture = 123
+            fn do_it() {
+                ret capture
+            }
+            fn higher(func) {
+                func()
+            }
+
+            ret higher(do_it)
+        }
+        "#;
+
+        let result = run(program);
+        assert_eq!(result, 123);
+    }
+
+    // TODO: this fails, it shouldn't
+    #[test]
+    #[should_panic]
+    fn test_first_class_with_args() {
+        let program = r#"
+            let capture = 123;
+            fn do_it(x, y) {
+                ret x
+            }
+            fn higher(func) {
+                func(777, 999)
+            }
+
+            ret higher(do_it)
+        }
+        "#;
+
+        let result = run(program);
+        assert_eq!(result, 777);
+    }
+
+    // TODO: this fails, it shouldn't
+    #[test]
+    #[should_panic]
+    fn test_first_class_with_captures() {
+        let program = r#"
+            let capture = 666
+            fn captured_func() {
+                ret capture
+            }
+            fn do_it(x, y) {
+                ret captured_func()
+            }
+            fn higher(func) {
+                func(777, 999)
+            }
+
+            ret higher(do_it)
+        }
+        "#;
+
+        let result = run(program);
+        assert_eq!(result, 666);
+    }
+       
+        
+
+
+    // TODO: this fails, it shouldn't
+    #[test]
     fn test_captures() {
         let program = r#"
             let shadowed = 66

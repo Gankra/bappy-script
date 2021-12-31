@@ -21,7 +21,7 @@ use nom::{
 //
 //
 //
-//
+// main!
 //
 //
 //
@@ -72,7 +72,7 @@ fn run(input: &str) -> (i64, Option<String>) {
 //
 //
 //
-//
+// parser!
 //
 //
 //
@@ -379,7 +379,7 @@ where
 //
 //
 //
-//
+// static analysis!
 //
 //
 //
@@ -493,7 +493,7 @@ fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut 
 //
 //
 //
-//
+// builtins!
 //
 //
 //
@@ -609,7 +609,7 @@ fn builtins() -> &'static [Builtin] {
 //
 //
 //
-//
+// runtime!
 //
 //
 //
@@ -883,7 +883,7 @@ impl<'p> Program<'p> {
 //
 //
 //
-//
+// tests!
 //
 //
 //

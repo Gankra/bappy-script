@@ -210,7 +210,7 @@ fn parse_func_body<'p>(
     let mut stmts = Vec::new();
 
     loop {
-        if i.is_empty() {
+        if i.trim().is_empty() {
             return Ok((
                 i,
                 Function {
@@ -721,6 +721,35 @@ mod test {
 
         let result = run(program);
         assert_eq!(result, -1);
+    }
+
+    #[test]
+    fn test_fake_bools() {
+        let program = r#"
+            fn true(if, else) {
+                ret if()
+            }
+            fn false(if, else) {
+                ret else()
+            }
+
+            let condition = true
+            let capture = 69
+
+            fn printTrue() {
+                print 1
+                ret add(capture, 1)
+            }
+            fn printFalse() {
+                print 0
+                ret add(capture, 0)
+            }
+
+            ret condition(printTrue, printFalse)
+        "#;
+
+        let result = run(program);
+        assert_eq!(result, 70);
     }
 
     #[test]

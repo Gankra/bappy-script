@@ -333,7 +333,7 @@ fn expr_var(i: &str) -> IResult<&str, Expr> {
 }
 
 fn expr_lit(i: &str) -> IResult<&str, Expr> {
-    map(alt((expr_lit_int,)), Expr::Lit)(i)
+    map(alt((expr_lit_int, expr_lit_str)), Expr::Lit)(i)
 }
 
 fn expr_lit_int(i: &str) -> IResult<&str, Literal> {
@@ -341,8 +341,10 @@ fn expr_lit_int(i: &str) -> IResult<&str, Literal> {
 }
 
 fn expr_lit_str(i: &str) -> IResult<&str, Literal> {
-    // unimplemented!
-    map(digit1, Literal::Str)(i)
+    let (i, _) = tag("\"")(i)?;
+    let (i, string) = take_until("\"")(i)?;
+    let (i, _) = tag("\"")(i)?;
+    Ok((i, Literal::Str(string)))
 }
 
 fn ident(i: &str) -> IResult<&str, &str> {
@@ -750,6 +752,17 @@ mod test {
 
         let result = run(program);
         assert_eq!(result, 70);
+    }
+
+    #[test]
+    fn test_str() {
+        let program = r#"
+            print "hello"
+            ret 1
+        "#;
+
+        let result = run(program);
+        assert_eq!(result, 1);
     }
 
     #[test]

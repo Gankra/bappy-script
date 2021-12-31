@@ -13,32 +13,45 @@ use nom::{
 };
 
 const MAIN_PROGRAM: &str = r#"
-    fn double(x) {
-        fn two(val) {
-            ret x(x(val))
+    let x = true
+    let y = 2
+
+    fn captures() {
+        if x {
+            ret y
         }
-        ret two
     }
 
-    fn succ(x) {
-        ret add(x, 1)
+    fn False() {
+        ret false
     }
 
-    let add_two = double(succ)
-    let add_four = double(add_two)
-    let add_eight = double(add_four)
+    if x {
+        print "yes1"
+        print y
+    }
+    
+    print "normal1"
+    
+    if False() {
+        print "oh no!"
+        ret -2
+    }
 
-    print add
-    print add_two
-    print add_four
-    print add_eight
+    print "normal2"
 
+    let x = false
+    let y = 3
+    print captures()
+    print x
+    print y
 
-    let a = add_two(1)
-    let b = add_four(1)
-    let c = add_eight(1)
+    if true {
+        print "yes2"
+        ret 999
+    }
 
-    ret add(add(a, b), c)
+    ret -1
 "#;
 
 fn main() {
@@ -160,10 +173,23 @@ struct Function<'p> {
 
 #[derive(Debug, Clone)]
 enum Stmt<'p> {
-    Let { name: &'p str, expr: Expr<'p> },
-    Func { func: Function<'p> },
-    Ret { expr: Expr<'p> },
-    Print { expr: Expr<'p> },
+    If {
+        expr: Expr<'p>,
+        stmts: Vec<Stmt<'p>>,
+    },
+    Let {
+        name: &'p str,
+        expr: Expr<'p>,
+    },
+    Func {
+        func: Function<'p>,
+    },
+    Ret {
+        expr: Expr<'p>,
+    },
+    Print {
+        expr: Expr<'p>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -185,8 +211,11 @@ enum Literal<'p> {
 enum Item<'p> {
     Func(&'p str, Vec<&'p str>),
     Stmt(Stmt<'p>),
+    If(Expr<'p>),
     End,
 }
+
+struct Block<'p>(Vec<Stmt<'p>>);
 
 #[derive(Clone)]
 struct Builtin {
@@ -202,36 +231,31 @@ impl fmt::Debug for Builtin {
 }
 
 fn parse(i: &str) -> IResult<&str, Program> {
-    let (i, main) = parse_func_body(i, "main", Vec::new())?;
+    let (i, Block(stmts)) = parse_block(i)?;
+    let main = Some(Function {
+        name: "main",
+        args: Vec::new(),
+        stmts,
+        captures: HashSet::new(),
+    });
+
     Ok((
         i,
         Program {
-            main: Some(main),
+            main,
+            // other state populated by caller
             builtins: &[],
             output: None,
         },
     ))
 }
 
-fn parse_func_body<'p>(
-    mut i: &'p str,
-    name: &'p str,
-    args: Vec<&'p str>,
-) -> IResult<&'p str, Function<'p>> {
+fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, Block<'p>> {
     let mut stmts = Vec::new();
 
     loop {
         if i.trim().is_empty() {
-            return Ok((
-                i,
-                Function {
-                    name,
-                    args,
-                    stmts,
-                    // Captures are populated by the type checker
-                    captures: HashSet::new(),
-                },
-            ));
+            return Ok((i, Block(stmts)));
         }
 
         let (new_i, line) = take_until("\n")(i)?;
@@ -245,34 +269,39 @@ fn parse_func_body<'p>(
 
         match item(line)?.1 {
             Item::Func(name, args) => {
-                let (new_i, func) = parse_func_body(i, name, args)?;
+                let (new_i, Block(block_stmts)) = parse_block(i)?;
                 i = new_i;
-                stmts.push(Stmt::Func { func });
+                stmts.push(Stmt::Func {
+                    func: Function {
+                        name,
+                        args,
+                        stmts: block_stmts,
+                        // Captures are populated by the type checker
+                        captures: HashSet::new(),
+                    },
+                });
+            }
+            Item::If(expr) => {
+                let (new_i, Block(block_stmts)) = parse_block(i)?;
+                i = new_i;
+                stmts.push(Stmt::If {
+                    expr,
+                    stmts: block_stmts,
+                })
             }
             Item::Stmt(stmt) => {
                 stmts.push(stmt);
             }
-            Item::End => {
-                return Ok((
-                    i,
-                    Function {
-                        name,
-                        args,
-                        stmts,
-                        // Captures are populated by the type checker
-                        captures: HashSet::new(),
-                    },
-                ));
-            }
+            Item::End => return Ok((i, Block(stmts))),
         }
     }
 }
 
 fn item(i: &str) -> IResult<&str, Item> {
-    alt((func, stmt, end))(i)
+    alt((item_func, item_if, item_end, item_stmt))(i)
 }
 
-fn func(i: &str) -> IResult<&str, Item> {
+fn item_func(i: &str) -> IResult<&str, Item> {
     let (i, _) = tag("fn")(i)?;
     let (i, _) = space1(i)?;
     let (i, name) = ident(i)?;
@@ -287,11 +316,20 @@ fn func(i: &str) -> IResult<&str, Item> {
     Ok((i, Item::Func(name, args)))
 }
 
-fn stmt(i: &str) -> IResult<&str, Item> {
+fn item_if(i: &str) -> IResult<&str, Item> {
+    let (i, _) = tag("if")(i)?;
+    let (i, _) = space1(i)?;
+    let (i, expr) = expr(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("{")(i)?;
+    Ok((i, Item::If(expr)))
+}
+
+fn item_stmt(i: &str) -> IResult<&str, Item> {
     map(alt((stmt_let, stmt_ret, stmt_print)), Item::Stmt)(i)
 }
 
-fn end(i: &str) -> IResult<&str, Item> {
+fn item_end(i: &str) -> IResult<&str, Item> {
     let (i, _) = tag("}")(i)?;
     Ok((i, Item::End))
 }
@@ -437,10 +475,25 @@ fn check_func<'p>(func: &mut Function<'p>, envs: &mut Vec<CheckEnv<'p>>) {
     envs.push(CheckEnv { vars });
     let mut captures = HashSet::new();
 
-    for stmt in &mut func.stmts {
+    check_block(&mut func.stmts, envs, &mut captures);
+
+    func.captures = captures;
+    envs.pop();
+}
+
+fn check_block<'p>(
+    stmts: &mut [Stmt<'p>],
+    envs: &mut Vec<CheckEnv<'p>>,
+    captures: &mut HashSet<&'p str>,
+) {
+    for stmt in stmts {
         match stmt {
+            Stmt::If { expr, stmts } => {
+                check_expr(expr, envs, captures);
+                check_block(stmts, envs, captures);
+            }
             Stmt::Let { name, expr } => {
-                check_expr(expr, envs, &mut captures);
+                check_expr(expr, envs, captures);
                 envs.last_mut().unwrap().vars.insert(name, ());
             }
             Stmt::Func { func } => {
@@ -448,13 +501,10 @@ fn check_func<'p>(func: &mut Function<'p>, envs: &mut Vec<CheckEnv<'p>>) {
                 check_func(func, envs);
             }
             Stmt::Ret { expr } | Stmt::Print { expr } => {
-                check_expr(expr, envs, &mut captures);
+                check_expr(expr, envs, captures);
             }
         }
     }
-
-    func.captures = captures;
-    envs.pop();
 }
 
 fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut HashSet<&'p str>) {
@@ -587,8 +637,25 @@ impl<'p> Program<'p> {
         vals.extend(captures.into_iter());
 
         envs.push(Env { vals });
+        let result = self.eval_block(&func.stmts, envs);
+        envs.pop();
 
-        for stmt in &func.stmts {
+        if let Some(val) = result {
+            val
+        } else {
+            panic!(
+                "Ran out of statements to evaulate for function {}",
+                func.name
+            );
+        }
+    }
+
+    fn eval_block<'e>(
+        &mut self,
+        stmts: &'e [Stmt<'p>],
+        envs: &mut Vec<Env<'e, 'p>>,
+    ) -> Option<Val<'e, 'p>> {
+        for stmt in stmts {
             match stmt {
                 Stmt::Let { name, expr } => {
                     let val = self.eval_expr(expr, envs);
@@ -606,22 +673,34 @@ impl<'p> Program<'p> {
                         .vals
                         .insert(func.name, Val::Func(Closure { captures, func }));
                 }
+                Stmt::If { expr, stmts } => {
+                    match self.eval_expr(expr, envs) {
+                        Val::Bool(true) => {
+                            let result = self.eval_block(stmts, envs);
+                            if result.is_some() {
+                                // Block evaled a return, bubble it up
+                                return result;
+                            }
+                        }
+                        Val::Bool(false) => {
+                            // Do nothing, skip the block
+                        }
+                        _ => {
+                            panic!("Tried to branch on non-boolean!");
+                        }
+                    }
+                }
                 Stmt::Print { expr } => {
                     let val = self.eval_expr(expr, envs);
                     self.print_val(&val);
                 }
                 Stmt::Ret { expr } => {
                     let val = self.eval_expr(expr, envs);
-                    envs.pop();
-                    return val;
+                    return Some(val);
                 }
             }
         }
-
-        panic!(
-            "Ran out of statements to evaulate for function {}",
-            func.name
-        );
+        None
     }
 
     fn eval_expr<'e>(&mut self, expr: &Expr<'p>, envs: &mut Vec<Env<'e, 'p>>) -> Val<'e, 'p> {
@@ -753,6 +832,66 @@ impl<'p> Program<'p> {
 #[cfg(test)]
 mod test {
     use super::run;
+
+    #[test]
+    fn test_if() {
+        let program = r#"
+            let x = true
+            let y = 2
+
+            fn captures() {
+                if x {
+                    ret y
+                }
+            }
+
+            fn False() {
+                ret false
+            }
+
+            if x {
+                print "yes1"
+                print y
+            }
+            
+            print "normal1"
+            
+            if False() {
+                print "oh no!"
+                ret -2
+            }
+
+            print "normal2"
+
+            let x = false
+            let y = 3
+            print captures()
+            print x
+            print y
+
+            if true {
+                print "yes2"
+                ret 999
+            }
+
+            ret -1
+        "#;
+
+        let (result, output) = run(program);
+        assert_eq!(result, 999);
+        assert_eq!(
+            output.unwrap(),
+            r#"yes1
+2
+normal1
+normal2
+2
+false
+3
+yes2
+"#
+        );
+    }
 
     #[test]
     fn test_builtin_math() {

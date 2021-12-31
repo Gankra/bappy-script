@@ -337,7 +337,7 @@ fn expr_lit(i: &str) -> IResult<&str, Expr> {
 }
 
 fn expr_lit_int(i: &str) -> IResult<&str, Literal> {
-    map(map_res(digit1, |s: &str| s.parse::<i64>()), Literal::Int)(i)
+    map(nom::character::complete::i64, Literal::Int)(i)
 }
 
 fn expr_lit_str(i: &str) -> IResult<&str, Literal> {
@@ -712,9 +712,7 @@ mod test {
         assert_eq!(result, 66);
     }
 
-    // TODO: this fails, it shouldn't
     #[test]
-    #[should_panic]
     fn test_negative() {
         let program = r#"
             ret -1

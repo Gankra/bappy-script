@@ -13,24 +13,21 @@ use nom::{
 };
 
 const MAIN_PROGRAM: &str = r#"
-    fn double(x) {
-        fn two(val) {
-            ret x(x(val))
-        }
-        ret two
-    }
+    let a = 66
+    let b = -55
+    let c = "hello"
+    let d = ""
+    let e = true
+    let f = false
+    let g = ()
 
-    fn succ(x) {
-        ret add(x, 1)
-    }
-
-    let add_two = double(succ)
-    let add_four = double(add_two)
-    let add_eight = double(add_four)
-
-    print add_two(1)
-    print add_four(1)
-    print add_eight(1)
+    print a
+    print b
+    print c
+    print d
+    print e
+    print f
+    print g
 
     ret 0
 "#;
@@ -71,6 +68,7 @@ fn builtins() -> &'static [(&'static str, Builtin)] {
         (
             "add",
             Builtin {
+                name: "add",
                 args: &["lhs", "rhs"],
                 func: builtin_add,
             },
@@ -78,6 +76,7 @@ fn builtins() -> &'static [(&'static str, Builtin)] {
         (
             "sub",
             Builtin {
+                name: "sub",
                 args: &["lhs", "rhs"],
                 func: builtin_sub,
             },
@@ -85,6 +84,7 @@ fn builtins() -> &'static [(&'static str, Builtin)] {
         (
             "mul",
             Builtin {
+                name: "mul",
                 args: &["lhs", "rhs"],
                 func: builtin_mul,
             },
@@ -171,6 +171,8 @@ enum Expr<'p> {
 enum Literal<'p> {
     Int(i64),
     Str(&'p str),
+    Bool(bool),
+    Empty(()),
 }
 
 // Parse intermediates
@@ -182,6 +184,7 @@ enum Item<'p> {
 
 #[derive(Clone)]
 struct Builtin {
+    name: &'static str,
     args: &'static [&'static str],
     func: for<'p> fn(args: &[Val<'p>]) -> Val<'p>,
 }
@@ -334,7 +337,10 @@ fn expr_var(i: &str) -> IResult<&str, Expr> {
 }
 
 fn expr_lit(i: &str) -> IResult<&str, Expr> {
-    map(alt((expr_lit_int, expr_lit_str)), Expr::Lit)(i)
+    map(
+        alt((expr_lit_int, expr_lit_str, expr_lit_bool, expr_lit_empty)),
+        Expr::Lit,
+    )(i)
 }
 
 fn expr_lit_int(i: &str) -> IResult<&str, Literal> {
@@ -346,6 +352,17 @@ fn expr_lit_str(i: &str) -> IResult<&str, Literal> {
     let (i, string) = take_until("\"")(i)?;
     let (i, _) = tag("\"")(i)?;
     Ok((i, Literal::Str(string)))
+}
+
+fn expr_lit_bool(i: &str) -> IResult<&str, Literal> {
+    alt((
+        map(tag("true"), |_| Literal::Bool(true)),
+        map(tag("false"), |_| Literal::Bool(false)),
+    ))(i)
+}
+
+fn expr_lit_empty(i: &str) -> IResult<&str, Literal> {
+    map(tag("()"), |_| Literal::Empty(()))(i)
 }
 
 fn ident(i: &str) -> IResult<&str, &str> {
@@ -496,6 +513,8 @@ fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut 
 enum Val<'p> {
     Int(i64),
     Str(&'p str),
+    Bool(bool),
+    Empty(()),
     Func(Closure<'p>),
     Builtin(Builtin),
 }
@@ -606,8 +625,10 @@ fn eval_expr<'p>(expr: &'p Expr<'p>, envs: &mut Vec<Env<'p>>) -> Val<'p> {
         }
         Expr::Var(var) => eval_resolve_var(var, envs),
         Expr::Lit(lit) => match lit {
-            Literal::Int(int) => Val::Int(*int),
-            Literal::Str(string) => Val::Str(*string),
+            Literal::Int(val) => Val::Int(*val),
+            Literal::Str(val) => Val::Str(*val),
+            Literal::Bool(val) => Val::Bool(*val),
+            Literal::Empty(val) => Val::Empty(*val),
         },
     }
 }
@@ -629,11 +650,38 @@ fn print_val(val: &Val) {
         Val::Str(string) => {
             println!("{}", string);
         }
-        Val::Func(func) => {
-            println!("fn {}", func.func.name);
+        Val::Bool(boolean) => {
+            println!("{}", boolean);
         }
-        Val::Builtin(..) => {
-            println!("<builtin>");
+        Val::Empty(_) => {
+            println!("()");
+        }
+        Val::Func(closure) => {
+            print!("fn {}(", closure.func.name);
+            for (i, arg) in closure.func.args.iter().enumerate() {
+                if i != 0 {
+                    print!(", ");
+                }
+                print!("{}", arg);
+            }
+            println!(")");
+
+            if !closure.captures.is_empty() {
+                println!("  captures:");
+                for (arg, capture) in closure.func.args.iter().zip(closure.captures.iter()) {
+                    println!("  - {}: ", arg);
+                }
+            }
+        }
+        Val::Builtin(builtin) => {
+            print!("builtin {}(", builtin.name);
+            for (i, arg) in builtin.args.iter().enumerate() {
+                if i != 0 {
+                    print!(", ");
+                }
+                print!("{}", arg);
+            }
+            println!(")");
         }
     }
 }
@@ -770,14 +818,14 @@ mod test {
     #[test]
     fn test_fake_bools() {
         let program = r#"
-            fn true(if, else) {
+            fn True(if, else) {
                 ret if()
             }
-            fn false(if, else) {
+            fn False(if, else) {
                 ret else()
             }
 
-            let condition = true
+            let condition = True
             let capture = 69
 
             fn printTrue() {
@@ -808,6 +856,24 @@ mod test {
 
         let result = run(program);
         assert_eq!(result, 66 + 55 + 44 + 33);
+    }
+
+    #[test]
+    fn test_literals() {
+        let program = r#"
+            let a = 66
+            let b = -55
+            let c = "hello"
+            let d = ""
+            let e = true
+            let f = false
+            let g = ()
+
+            ret a
+        "#;
+
+        let result = run(program);
+        assert_eq!(result, 66);
     }
 
     #[test]

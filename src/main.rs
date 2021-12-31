@@ -1003,6 +1003,24 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "Parse Error")]
+    fn parse_fail_else_else() {
+        let program = r#"
+            if true {
+                ret 0
+            } else {
+                ret 1
+            } else {
+                ret 2
+            }
+            
+            ret 3
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
     #[should_panic(expected = "Runtime Error")]
     fn eval_fail_if_type() {
         let program = r#"

@@ -14,6 +14,7 @@ use nom::{
 
 const MAIN_PROGRAM: &str = r#"
     print "hello world!"
+    ret 0
 "#;
 
 fn main() {
@@ -21,58 +22,96 @@ fn main() {
 }
 
 fn builtin_add<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
-    assert!(args.len() == 2, "Builtin [add]: wrong number of args");
+    assert!(
+        args.len() == 2,
+        "Runtime Error: Builtin add had wrong number of args"
+    );
     if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
         Val::Int(lhs + rhs)
     } else {
-        panic!("Builtin [add]: wrong type of args")
+        panic!("Runtime Error: Builtin add had wrong type of args")
     }
 }
 
 fn builtin_mul<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
-    assert!(args.len() == 2, "Builtin [mul]: wrong number of args");
+    assert!(
+        args.len() == 2,
+        "Runtime Error: Builtin mul had wrong number of args"
+    );
     if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
         Val::Int(lhs * rhs)
     } else {
-        panic!("Builtin [mul]: wrong type of args")
+        panic!("Runtime Error: Builtin mul had wrong type of args")
     }
 }
 
 fn builtin_sub<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
-    assert!(args.len() == 2, "Builtin [sub]: wrong number of args");
+    assert!(
+        args.len() == 2,
+        "Runtime Error: Builtin sub had wrong number of args"
+    );
     if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
         Val::Int(lhs - rhs)
     } else {
-        panic!("Builtin [sub]: wrong type of args")
+        panic!("Runtime Error: Builtin sub had wrong type of args")
     }
 }
 
-fn builtins() -> &'static [(&'static str, Builtin)] {
+fn builtin_eq<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+    assert!(
+        args.len() == 2,
+        "Runtime Error: Builtin eq had wrong number of args"
+    );
+
+    // Currently restricting this to just ints for it to be statically
+    // typed, might change my mind later!
+    match (&args[0], &args[1]) {
+        (Val::Int(lhs), Val::Int(rhs)) => Val::Bool(lhs == rhs),
+        _ => {
+            panic!("Runtime Error: Builtin eq had wrong type of args")
+        }
+    }
+}
+
+fn builtin_not<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+    assert!(
+        args.len() == 1,
+        "Runtime Error: Builtin not had wrong number of args"
+    );
+    if let Val::Bool(rhs) = &args[0] {
+        Val::Bool(!rhs)
+    } else {
+        panic!("Runtime Error: Builtin sub had wrong type of args")
+    }
+}
+
+fn builtins() -> &'static [Builtin] {
     &[
-        (
-            "add",
-            Builtin {
-                name: "add",
-                args: &["lhs", "rhs"],
-                func: builtin_add,
-            },
-        ),
-        (
-            "sub",
-            Builtin {
-                name: "sub",
-                args: &["lhs", "rhs"],
-                func: builtin_sub,
-            },
-        ),
-        (
-            "mul",
-            Builtin {
-                name: "mul",
-                args: &["lhs", "rhs"],
-                func: builtin_mul,
-            },
-        ),
+        Builtin {
+            name: "add",
+            args: &["lhs", "rhs"],
+            func: builtin_add,
+        },
+        Builtin {
+            name: "sub",
+            args: &["lhs", "rhs"],
+            func: builtin_sub,
+        },
+        Builtin {
+            name: "mul",
+            args: &["lhs", "rhs"],
+            func: builtin_mul,
+        },
+        Builtin {
+            name: "eq",
+            args: &["lhs", "rhs"],
+            func: builtin_eq,
+        },
+        Builtin {
+            name: "not",
+            args: &["rhs"],
+            func: builtin_not,
+        },
     ]
 }
 
@@ -121,7 +160,7 @@ fn run(input: &str) -> (i64, Option<String>) {
 #[derive(Debug, Clone)]
 struct Program<'p> {
     main: Option<Function<'p>>,
-    builtins: &'static [(&'static str, Builtin)],
+    builtins: &'static [Builtin],
     output: Option<String>,
 }
 
@@ -433,7 +472,7 @@ fn check(mut program: Program) -> Program {
     let builtins = program
         .builtins
         .iter()
-        .map(|(name, _)| (*name, ()))
+        .map(|builtin| (builtin.name, ()))
         .collect();
     let mut envs = vec![CheckEnv { vars: builtins }];
     check_func(program.main.as_mut().unwrap(), &mut envs);
@@ -565,7 +604,7 @@ impl<'p> Program<'p> {
         let builtins = self
             .builtins
             .iter()
-            .map(|(_, builtin)| (builtin.name, Val::Builtin(builtin.clone())))
+            .map(|builtin| (builtin.name, Val::Builtin(builtin.clone())))
             .collect();
 
         let main = self.main.take().unwrap();
@@ -589,7 +628,7 @@ impl<'p> Program<'p> {
     ) -> Val<'e, 'p> {
         assert!(
             func.args.len() == args.len(),
-            "mismatched argument count for fn {} (expected {}, got {})",
+            "Runtime Error: mismatched argument count for fn {} (expected {}, got {})",
             func.name,
             func.args.len(),
             args.len(),
@@ -603,7 +642,7 @@ impl<'p> Program<'p> {
             .collect::<HashMap<_, _>>();
         assert!(
             vals.len() == func.args.len(),
-            "duplicate arg names for fn {}",
+            "Runtime Error: duplicate arg names for fn {}",
             func.name,
         );
 
@@ -617,7 +656,7 @@ impl<'p> Program<'p> {
             val
         } else {
             panic!(
-                "Ran out of statements to evaulate for function {}",
+                "Runtime Error: Ran out of statements to evaulate for function {}",
                 func.name
             );
         }
@@ -862,6 +901,70 @@ mod test {
 
     #[test]
     #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_add_count() {
+        let program = r#"
+            ret add(0, 1, 2)
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_add_types() {
+        let program = r#"
+            ret add(true, false)
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_not_count() {
+        let program = r#"
+            let x = not(true, false)
+            ret 0
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_not_type() {
+        let program = r#"
+            let x = not(0)
+            ret 0
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_eq_count() {
+        let program = r#"
+            let x = eq(1, 2, 3)
+            ret 0
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_eq_type() {
+        let program = r#"
+            let x = eq(true, false)
+            ret 0
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
     fn eval_fail_call_type() {
         let program = r#"
             let x = 0
@@ -869,6 +972,97 @@ mod test {
         "#;
 
         let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_no_ret() {
+        let program = r#"
+            fn f() {
+                print "hello"
+            }
+            ret f()
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_too_many_args() {
+        let program = r#"
+            fn f() {
+                ret 0
+            }
+            ret f(1)
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_too_few_args() {
+        let program = r#"
+            fn f(x, y) {
+                ret 0
+            }
+            ret f(1)
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_dupe_args() {
+        let program = r#"
+            // Can't give args the same name!
+            fn f(x, x) {
+                ret 0
+            }
+            ret f(1)
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    fn test_factorial() {
+        let program = r#"
+            fn factorial(self, val) {
+                if eq(val, 0) {
+                    ret 1
+                }
+                ret mul(self(self, sub(val, 1)), val)
+            }
+
+            print factorial(factorial, 0)
+            print factorial(factorial, 1)
+            print factorial(factorial, 2)
+            print factorial(factorial, 3)
+            print factorial(factorial, 4)
+            print factorial(factorial, 5)
+            print factorial(factorial, 6)
+            print factorial(factorial, 7)
+
+            ret 0
+        "#;
+
+        let (result, output) = run(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"1
+1
+2
+6
+24
+120
+720
+5040
+"#
+        )
     }
 
     #[test]
@@ -961,6 +1155,33 @@ normal2
 false
 3
 yes2
+"#
+        );
+    }
+
+    #[test]
+    fn test_builtin_bool() {
+        let program = r#"
+            let x = 0
+            if eq(x, 0) {
+                print "eq!"
+            }
+            if not(eq(x, 1)) {
+                print "neq!"
+            }
+
+            if eq(x, 1) {
+                ret -1
+            }
+            ret 0
+        "#;
+
+        let (result, output) = run(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"eq!
+neq!
 "#
         );
     }

@@ -4,10 +4,11 @@ use std::fmt;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
-    character::complete::{alphanumeric1, char, digit1, space0, space1},
-    combinator::{map, map_res},
+    character::complete::{alpha1, alphanumeric1, char, space0, space1},
+    combinator::{map, recognize},
     error::ParseError,
-    multi::separated_list0,
+    multi::{many0, separated_list0},
+    sequence::pair,
     AsChar, IResult, InputTakeAtPosition, Parser,
 };
 
@@ -348,7 +349,10 @@ fn expr_lit_str(i: &str) -> IResult<&str, Literal> {
 }
 
 fn ident(i: &str) -> IResult<&str, &str> {
-    alphanumeric1(i)
+    recognize(pair(
+        alt((alpha1, tag("_"))),
+        many0(alt((alphanumeric1, tag("_")))),
+    ))(i)
 }
 
 pub fn padded<F, T, O, E>(mut parser: F) -> impl FnMut(T) -> IResult<T, O, E>
@@ -750,6 +754,20 @@ mod test {
 
         let result = run(program);
         assert_eq!(result, 70);
+    }
+
+    #[test]
+    fn test_idents() {
+        let program = r#"
+            let _x = 66
+            let __y = 55
+            let _0 = 44
+            let _x_y__z_ = 33
+            ret add(add(add(_x, __y), _0), _x_y__z_)
+        "#;
+
+        let result = run(program);
+        assert_eq!(result, 66 + 55 + 44 + 33);
     }
 
     #[test]

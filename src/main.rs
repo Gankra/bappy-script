@@ -35,7 +35,13 @@ use nom::{
 //
 
 const MAIN_PROGRAM: &str = r#"
-    print "hello world!"
+
+    if false {
+        print "goodbye world!"
+    } else {
+        print "hello world!"
+    }
+
     ret 0
 "#;
 
@@ -105,6 +111,7 @@ enum Stmt<'p> {
     If {
         expr: Expr<'p>,
         stmts: Vec<Stmt<'p>>,
+        else_stmts: Vec<Stmt<'p>>,
     },
     Let {
         name: &'p str,
@@ -142,6 +149,7 @@ enum Item<'p> {
     Func(&'p str, Vec<&'p str>),
     Stmt(Stmt<'p>),
     If(Expr<'p>),
+    Else,
     End,
 }
 
@@ -161,13 +169,18 @@ impl fmt::Debug for Builtin {
 }
 
 fn parse(i: &str) -> IResult<&str, Program> {
-    let (i, Block(stmts)) = parse_block(i)?;
+    let (i, (Block(stmts), terminal)) = parse_block(i)?;
     let main = Some(Function {
         name: "main",
         args: Vec::new(),
         stmts,
         captures: HashSet::new(),
     });
+
+    assert!(
+        matches!(terminal, Item::End),
+        "Parse Error: function ending eith an `else`"
+    );
 
     Ok((
         i,
@@ -180,12 +193,12 @@ fn parse(i: &str) -> IResult<&str, Program> {
     ))
 }
 
-fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, Block<'p>> {
+fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, (Block<'p>, Item<'p>)> {
     let mut stmts = Vec::new();
 
     loop {
         if i.trim().is_empty() {
-            return Ok((i, Block(stmts)));
+            return Ok((i, (Block(stmts), Item::End)));
         }
 
         let (new_i, line) = take_until("\n")(i)?;
@@ -199,8 +212,14 @@ fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, Block<'p>> {
 
         match item(line)?.1 {
             Item::Func(name, args) => {
-                let (new_i, Block(block_stmts)) = parse_block(i)?;
+                let (new_i, (Block(block_stmts), terminal)) = parse_block(i)?;
                 i = new_i;
+
+                assert!(
+                    matches!(terminal, Item::End),
+                    "Parse Error: function ending eith an `else`"
+                );
+
                 stmts.push(Stmt::Func {
                     func: Function {
                         name,
@@ -212,11 +231,26 @@ fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, Block<'p>> {
                 });
             }
             Item::If(expr) => {
-                let (new_i, Block(block_stmts)) = parse_block(i)?;
+                let (new_i, (Block(block_stmts), terminal)) = parse_block(i)?;
                 i = new_i;
+
+                let else_stmts = if let Item::Else = terminal {
+                    let (new_i, (Block(else_stmts), terminal)) = parse_block(i)?;
+                    i = new_i;
+
+                    assert!(
+                        matches!(terminal, Item::End),
+                        "Parse Error: `else` ending eith an `else`"
+                    );
+                    else_stmts
+                } else {
+                    Vec::new()
+                };
+
                 stmts.push(Stmt::If {
                     expr,
                     stmts: block_stmts,
+                    else_stmts,
                 })
             }
             Item::Stmt(stmt) => {
@@ -225,13 +259,20 @@ fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, Block<'p>> {
             Item::Comment(_comment) => {
                 // discard it
             }
-            Item::End => return Ok((i, Block(stmts))),
+            item @ Item::End | item @ Item::Else => return Ok((i, (Block(stmts), item))),
         }
     }
 }
 
 fn item(i: &str) -> IResult<&str, Item> {
-    alt((item_comment, item_end, item_func, item_if, item_stmt))(i)
+    alt((
+        item_comment,
+        item_else,
+        item_end,
+        item_if,
+        item_func,
+        item_stmt,
+    ))(i)
 }
 
 fn item_comment(i: &str) -> IResult<&str, Item> {
@@ -265,13 +306,22 @@ fn item_if(i: &str) -> IResult<&str, Item> {
     Ok((i, Item::If(expr)))
 }
 
-fn item_stmt(i: &str) -> IResult<&str, Item> {
-    map(alt((stmt_let, stmt_ret, stmt_print)), Item::Stmt)(i)
+fn item_else(i: &str) -> IResult<&str, Item> {
+    let (i, _) = tag("}")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("else")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("{")(i)?;
+    Ok((i, Item::Else))
 }
 
 fn item_end(i: &str) -> IResult<&str, Item> {
     let (i, _) = tag("}")(i)?;
     Ok((i, Item::End))
+}
+
+fn item_stmt(i: &str) -> IResult<&str, Item> {
+    map(alt((stmt_let, stmt_ret, stmt_print)), Item::Stmt)(i)
 }
 
 fn stmt_let(i: &str) -> IResult<&str, Stmt> {
@@ -425,9 +475,14 @@ fn check_block<'p>(
 ) {
     for stmt in stmts {
         match stmt {
-            Stmt::If { expr, stmts } => {
+            Stmt::If {
+                expr,
+                stmts,
+                else_stmts,
+            } => {
                 check_expr(expr, envs, captures);
                 check_block(stmts, envs, captures);
+                check_block(else_stmts, envs, captures);
             }
             Stmt::Let { name, expr } => {
                 check_expr(expr, envs, captures);
@@ -729,24 +784,25 @@ impl<'p> Program<'p> {
                         .vals
                         .insert(func.name, Val::Func(Closure { captures, func }));
                 }
-                Stmt::If { expr, stmts } => {
-                    match self.eval_expr(expr, envs) {
-                        Val::Bool(true) => {
-                            let result = self.eval_block(stmts, envs);
-                            if result.is_some() {
-                                // Block evaled a return, bubble it up
-                                return result;
-                            }
-                        }
-                        Val::Bool(false) => {
-                            // Do nothing, skip the block
-                        }
+                Stmt::If {
+                    expr,
+                    stmts,
+                    else_stmts,
+                } => {
+                    let result = match self.eval_expr(expr, envs) {
+                        Val::Bool(true) => self.eval_block(stmts, envs),
+                        Val::Bool(false) => self.eval_block(else_stmts, envs),
                         val => {
                             panic!(
                                 "Runtime Error: Tried to branch on non-boolean {}",
                                 self.format_val(&val, true, 0)
                             );
                         }
+                    };
+
+                    if result.is_some() {
+                        // Block evaled a return, bubble it up
+                        return result;
                     }
                 }
                 Stmt::Print { expr } => {
@@ -925,6 +981,22 @@ mod test {
     fn parse_fail_basic() {
         let program = r#"
             !
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Parse Error")]
+    fn parse_fail_else_func() {
+        let program = r#"
+            fn f() {
+                ret 0
+            } else {
+                print 1
+            }
+            
+            ret f()
         "#;
 
         let (_result, _output) = run(program);
@@ -1169,6 +1241,12 @@ mod test {
             if False() {
                 print "oh no!"
                 ret -2
+            } else {
+                print "else1"
+            }
+
+            if False() {
+                print "oh no!"
             }
 
             print "normal2"
@@ -1176,6 +1254,20 @@ mod test {
             let x = false
             let y = 3
             print captures()
+            print x
+            print y
+
+            fn captures2() {
+                if x {
+                    ret 1
+                } else {
+                    ret sub(y, 4)
+                }
+            }
+
+            let x = 1
+            let y = 4
+            print captures2()
             print x
             print y
 
@@ -1194,10 +1286,14 @@ mod test {
             r#"yes1
 2
 normal1
+else1
 normal2
 2
 false
 3
+-1
+1
+4
 yes2
 "#
         );

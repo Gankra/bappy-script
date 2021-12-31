@@ -13,46 +13,7 @@ use nom::{
 };
 
 const MAIN_PROGRAM: &str = r#"
-    // test
-    let x = true
-    let y = 2
-
-    fn captures() {
-        if x {
-            ret y
-        }
-    }
-
-    fn False() {
-        ret false
-    }
-
-    if x {
-        print "yes1"
-        print y
-    }
-    
-    print "normal1"
-    
-    if False() {
-        print "oh no!"
-        ret -2
-    }
-
-    print "normal2"
-
-    let x = false
-    let y = 3
-    print captures()
-    print x
-    print y
-
-    if true {
-        print "yes2"
-        ret 999
-    }
-
-    ret -1
+    print "hello world!"
 "#;
 
 fn main() {
@@ -117,7 +78,7 @@ fn builtins() -> &'static [(&'static str, Builtin)] {
 
 fn run(input: &str) -> (i64, Option<String>) {
     println!("parsing...");
-    let (_, mut bin) = parse(input).unwrap();
+    let (_, mut bin) = parse(input).expect("Parse Error");
     println!("parsed!\n");
 
     bin.builtins = builtins();
@@ -506,8 +467,11 @@ fn check_block<'p>(
                 envs.last_mut().unwrap().vars.insert(name, ());
             }
             Stmt::Func { func } => {
-                envs.last_mut().unwrap().vars.insert(func.name, ());
+                // We push a func's name after checking it to avoid
+                // infinite capture recursion. This means naive recursion
+                // is illegal.
                 check_func(func, envs);
+                envs.last_mut().unwrap().vars.insert(func.name, ());
             }
             Stmt::Ret { expr } | Stmt::Print { expr } => {
                 check_expr(expr, envs, captures);
@@ -694,8 +658,11 @@ impl<'p> Program<'p> {
                         Val::Bool(false) => {
                             // Do nothing, skip the block
                         }
-                        _ => {
-                            panic!("Tried to branch on non-boolean!");
+                        val => {
+                            panic!(
+                                "Runtime Error: Tried to branch on non-boolean {}",
+                                self.format_val(&val, true, 0)
+                            );
                         }
                     }
                 }
@@ -727,7 +694,11 @@ impl<'p> Program<'p> {
                     }
                     Val::Builtin(builtin) => (builtin.func)(&evaled_args),
                     _ => {
-                        panic!("Tried to call a non-function: {}", func_name);
+                        panic!(
+                            "Runtime Error: Tried to call a non-function {}: {}",
+                            func_name,
+                            self.format_val(&func, true, 0)
+                        );
                     }
                 }
             }
@@ -747,11 +718,11 @@ impl<'p> Program<'p> {
                 return val.clone();
             }
         }
-        panic!("Use of undefined var: {}", var);
+        panic!("Runtime Error: Use of undefined var {}", var);
     }
 
     fn print_val<'e>(&mut self, val: &Val<'e, 'p>) {
-        let string = self.format_val(val, 0);
+        let string = self.format_val(val, false, 0);
         println!("{}", string);
 
         if let Some(output) = self.output.as_mut() {
@@ -760,13 +731,17 @@ impl<'p> Program<'p> {
         }
     }
 
-    fn format_val<'e>(&mut self, val: &Val<'e, 'p>, indent: usize) -> String {
+    fn format_val<'e>(&mut self, val: &Val<'e, 'p>, debug: bool, indent: usize) -> String {
         match val {
             Val::Int(int) => {
                 format!("{}", int)
             }
             Val::Str(string) => {
-                format!("{}", string)
+                if debug {
+                    format!(r#""{}""#, string)
+                } else {
+                    format!("{}", string)
+                }
             }
             Val::Bool(boolean) => {
                 format!("{}", boolean)
@@ -791,7 +766,8 @@ impl<'p> Program<'p> {
                     for (arg, capture) in &closure.captures {
                         writeln!(f, "").unwrap();
                         let sub_indent = indent + arg.len() + 2;
-                        let val = self.format_val(capture, sub_indent);
+                        // Debug print captures unconditionally to make 0 vs "0" clear
+                        let val = self.format_val(capture, true, sub_indent);
                         write!(f, "{:indent$}- {}: {}", "", arg, val, indent = indent).unwrap();
                     }
                 }
@@ -841,6 +817,59 @@ impl<'p> Program<'p> {
 #[cfg(test)]
 mod test {
     use super::run;
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_recursive() {
+        let program = r#"
+            fn recursive() {
+                if false {
+                    // Can't self-reference
+                    ret recursive()
+                } else {
+                    ret 0
+                }
+            }
+
+            ret recursive()
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Parse Error")]
+    fn parse_fail_basic() {
+        let program = r#"
+            !
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_if_type() {
+        let program = r#"
+            if 0 {
+                ret 0
+            }
+            ret 1
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_call_type() {
+        let program = r#"
+            let x = 0
+            ret x()
+        "#;
+
+        let (_result, _output) = run(program);
+    }
 
     #[test]
     fn test_comments() {

@@ -35,15 +35,31 @@ use nom::{
 //
 
 const MAIN_PROGRAM: &str = r#"
+    let x = 10
 
+    fn remembers_original() {
+        ret x
+    }
     loop {
-        if false {
+        fn remembers_previous() {
+            ret x
+        }
+
+        // Exit the loop at 0
+        if eq(x, 0) {
             break
-        } else {
-            print "hello"
+        }
+        set x = sub(x, 1)
+
+        // Skip 2, no one likes 2
+        if eq(x, 2) {
             continue
         }
-        
+
+        print "loop!"
+        print remembers_original()
+        print remembers_previous()
+        print x
     }
 
     ret 0
@@ -121,6 +137,10 @@ enum Stmt<'p> {
         stmts: Vec<Stmt<'p>>,
     },
     Let {
+        name: &'p str,
+        expr: Expr<'p>,
+    },
+    Set {
         name: &'p str,
         expr: Expr<'p>,
     },
@@ -351,7 +371,14 @@ fn item_end(i: &str) -> IResult<&str, Item> {
 
 fn item_stmt(i: &str) -> IResult<&str, Item> {
     map(
-        alt((stmt_break, stmt_continue, stmt_let, stmt_ret, stmt_print)),
+        alt((
+            stmt_break,
+            stmt_continue,
+            stmt_let,
+            stmt_set,
+            stmt_return,
+            stmt_print,
+        )),
         Item::Stmt,
     )(i)
 }
@@ -368,7 +395,19 @@ fn stmt_let(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::Let { name, expr }))
 }
 
-fn stmt_ret(i: &str) -> IResult<&str, Stmt> {
+fn stmt_set(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = tag("set")(i)?;
+    let (i, _) = space1(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("=")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, expr) = expr(i)?;
+
+    Ok((i, Stmt::Set { name, expr }))
+}
+
+fn stmt_return(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = tag("ret")(i)?;
     let (i, _) = space1(i)?;
     let (i, expr) = expr(i)?;
@@ -539,6 +578,15 @@ fn check_block<'p>(
             Stmt::Let { name, expr } => {
                 check_expr(expr, envs, captures);
                 envs.last_mut().unwrap().vars.insert(name, ());
+            }
+            Stmt::Set { name, expr } => {
+                check_expr(expr, envs, captures);
+                let old = envs.last_mut().unwrap().vars.insert(name, ());
+                assert!(
+                    old.is_some(),
+                    "Compile Error: trying to set an undefined local variable {}",
+                    name
+                );
             }
             Stmt::Ret { expr } | Stmt::Print { expr } => {
                 check_expr(expr, envs, captures);
@@ -834,6 +882,15 @@ impl<'p> Program<'p> {
                     let val = self.eval_expr(expr, envs);
                     envs.last_mut().unwrap().vals.insert(*name, val);
                 }
+                Stmt::Set { name, expr } => {
+                    let val = self.eval_expr(expr, envs);
+                    let old = envs.last_mut().unwrap().vals.insert(*name, val);
+                    assert!(
+                        old.is_some(),
+                        "Runtime Error: Tried to set an undefined local variable {}",
+                        name
+                    );
+                }
                 Stmt::Func { func } => {
                     let captures = func
                         .captures
@@ -1038,6 +1095,33 @@ impl<'p> Program<'p> {
 #[cfg(test)]
 mod test {
     use super::run;
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_set_undefined() {
+        let program = r#"
+            set x = 1
+            let x = 0
+            ret x
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_set_capture() {
+        let program = r#"
+            let x = 0
+            fn f() {
+                set x = 1
+                ret x
+            }
+            ret f()
+        "#;
+
+        let (_result, _output) = run(program);
+    }
 
     #[test]
     #[should_panic(expected = "Compile Error")]
@@ -1752,6 +1836,134 @@ false
             output.unwrap(),
             r#"yay1
 17
+"#
+        );
+    }
+
+    #[test]
+    fn test_loops_and_set() {
+        let program = r#"
+            let x = 10
+
+            fn remembers_original() {
+                ret x
+            }
+            loop {
+                fn remembers_previous() {
+                    ret x
+                }
+
+                // Exit the loop at 0
+                if eq(x, 0) {
+                    break
+                }
+                set x = sub(x, 1)
+
+                // Skip 2, no one likes 2
+                if eq(x, 2) {
+                    continue
+                }
+
+                print "loop!"
+                print remembers_original()
+                print remembers_previous()
+                print x
+            }
+
+            ret 0
+        "#;
+
+        let (result, output) = run(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"loop!
+10
+10
+9
+loop!
+10
+9
+8
+loop!
+10
+8
+7
+loop!
+10
+7
+6
+loop!
+10
+6
+5
+loop!
+10
+5
+4
+loop!
+10
+4
+3
+loop!
+10
+2
+1
+loop!
+10
+1
+0
+"#
+        );
+    }
+
+    #[test]
+    fn test_set_basic() {
+        let program = r#"
+            let x = 0
+            print x
+            
+            set x = 3
+            print x
+            
+            set x = add(x, 8)
+            print x
+            
+            if true {
+                set x = 27
+            } else {
+                set x = 4
+            }
+            print x
+
+            if false {
+                set x = 2
+            } else {
+                set x = 35
+            }
+            print x
+
+            // reinitialize value
+            let x = 58
+            print x
+
+            set x = 71
+            print x
+
+            ret 0
+        "#;
+
+        let (result, output) = run(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"0
+3
+11
+27
+35
+58
+71
 "#
         );
     }

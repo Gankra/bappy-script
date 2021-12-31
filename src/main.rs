@@ -12,6 +12,28 @@ use nom::{
     AsChar, IResult, InputTakeAtPosition, Parser,
 };
 
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+
 const MAIN_PROGRAM: &str = r#"
     print "hello world!"
     ret 0
@@ -19,100 +41,6 @@ const MAIN_PROGRAM: &str = r#"
 
 fn main() {
     run(MAIN_PROGRAM);
-}
-
-fn builtin_add<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
-    assert!(
-        args.len() == 2,
-        "Runtime Error: Builtin add had wrong number of args"
-    );
-    if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
-        Val::Int(lhs + rhs)
-    } else {
-        panic!("Runtime Error: Builtin add had wrong type of args")
-    }
-}
-
-fn builtin_mul<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
-    assert!(
-        args.len() == 2,
-        "Runtime Error: Builtin mul had wrong number of args"
-    );
-    if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
-        Val::Int(lhs * rhs)
-    } else {
-        panic!("Runtime Error: Builtin mul had wrong type of args")
-    }
-}
-
-fn builtin_sub<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
-    assert!(
-        args.len() == 2,
-        "Runtime Error: Builtin sub had wrong number of args"
-    );
-    if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
-        Val::Int(lhs - rhs)
-    } else {
-        panic!("Runtime Error: Builtin sub had wrong type of args")
-    }
-}
-
-fn builtin_eq<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
-    assert!(
-        args.len() == 2,
-        "Runtime Error: Builtin eq had wrong number of args"
-    );
-
-    // Currently restricting this to just ints for it to be statically
-    // typed, might change my mind later!
-    match (&args[0], &args[1]) {
-        (Val::Int(lhs), Val::Int(rhs)) => Val::Bool(lhs == rhs),
-        _ => {
-            panic!("Runtime Error: Builtin eq had wrong type of args")
-        }
-    }
-}
-
-fn builtin_not<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
-    assert!(
-        args.len() == 1,
-        "Runtime Error: Builtin not had wrong number of args"
-    );
-    if let Val::Bool(rhs) = &args[0] {
-        Val::Bool(!rhs)
-    } else {
-        panic!("Runtime Error: Builtin sub had wrong type of args")
-    }
-}
-
-fn builtins() -> &'static [Builtin] {
-    &[
-        Builtin {
-            name: "add",
-            args: &["lhs", "rhs"],
-            func: builtin_add,
-        },
-        Builtin {
-            name: "sub",
-            args: &["lhs", "rhs"],
-            func: builtin_sub,
-        },
-        Builtin {
-            name: "mul",
-            args: &["lhs", "rhs"],
-            func: builtin_mul,
-        },
-        Builtin {
-            name: "eq",
-            args: &["lhs", "rhs"],
-            func: builtin_eq,
-        },
-        Builtin {
-            name: "not",
-            args: &["rhs"],
-            func: builtin_not,
-        },
-    ]
 }
 
 fn run(input: &str) -> (i64, Option<String>) {
@@ -554,6 +482,122 @@ fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut 
             panic!("Compile Error: Call of undefined function {}", func);
         }
     }
+}
+
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+
+fn builtin_add<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+    assert!(
+        args.len() == 2,
+        "Runtime Error: Builtin add had wrong number of args"
+    );
+    if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
+        Val::Int(lhs + rhs)
+    } else {
+        panic!("Runtime Error: Builtin add had wrong type of args")
+    }
+}
+
+fn builtin_mul<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+    assert!(
+        args.len() == 2,
+        "Runtime Error: Builtin mul had wrong number of args"
+    );
+    if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
+        Val::Int(lhs * rhs)
+    } else {
+        panic!("Runtime Error: Builtin mul had wrong type of args")
+    }
+}
+
+fn builtin_sub<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+    assert!(
+        args.len() == 2,
+        "Runtime Error: Builtin sub had wrong number of args"
+    );
+    if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
+        Val::Int(lhs - rhs)
+    } else {
+        panic!("Runtime Error: Builtin sub had wrong type of args")
+    }
+}
+
+fn builtin_eq<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+    assert!(
+        args.len() == 2,
+        "Runtime Error: Builtin eq had wrong number of args"
+    );
+
+    // Currently restricting this to just ints for it to be statically
+    // typed, might change my mind later!
+    match (&args[0], &args[1]) {
+        (Val::Int(lhs), Val::Int(rhs)) => Val::Bool(lhs == rhs),
+        _ => {
+            panic!("Runtime Error: Builtin eq had wrong type of args")
+        }
+    }
+}
+
+fn builtin_not<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+    assert!(
+        args.len() == 1,
+        "Runtime Error: Builtin not had wrong number of args"
+    );
+    if let Val::Bool(rhs) = &args[0] {
+        Val::Bool(!rhs)
+    } else {
+        panic!("Runtime Error: Builtin sub had wrong type of args")
+    }
+}
+
+fn builtins() -> &'static [Builtin] {
+    &[
+        Builtin {
+            name: "add",
+            args: &["lhs", "rhs"],
+            func: builtin_add,
+        },
+        Builtin {
+            name: "sub",
+            args: &["lhs", "rhs"],
+            func: builtin_sub,
+        },
+        Builtin {
+            name: "mul",
+            args: &["lhs", "rhs"],
+            func: builtin_mul,
+        },
+        Builtin {
+            name: "eq",
+            args: &["lhs", "rhs"],
+            func: builtin_eq,
+        },
+        Builtin {
+            name: "not",
+            args: &["rhs"],
+            func: builtin_not,
+        },
+    ]
 }
 
 //

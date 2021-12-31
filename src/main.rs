@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt;
+use std::fmt::{self, Write};
 
 use nom::{
     branch::alt,
@@ -13,30 +13,39 @@ use nom::{
 };
 
 const MAIN_PROGRAM: &str = r#"
-    let a = 66
-    let b = -55
-    let c = "hello"
-    let d = ""
-    let e = true
-    let f = false
-    let g = ()
+    fn double(x) {
+        fn two(val) {
+            ret x(x(val))
+        }
+        ret two
+    }
 
-    print a
-    print b
-    print c
-    print d
-    print e
-    print f
-    print g
+    fn succ(x) {
+        ret add(x, 1)
+    }
 
-    ret 0
+    let add_two = double(succ)
+    let add_four = double(add_two)
+    let add_eight = double(add_four)
+
+    print add
+    print add_two
+    print add_four
+    print add_eight
+
+
+    let a = add_two(1)
+    let b = add_four(1)
+    let c = add_eight(1)
+
+    ret add(add(a, b), c)
 "#;
 
 fn main() {
     run(MAIN_PROGRAM);
 }
 
-fn builtin_add<'p>(args: &[Val<'p>]) -> Val<'p> {
+fn builtin_add<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     assert!(args.len() == 2, "Builtin [add]: wrong number of args");
     if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
         Val::Int(lhs + rhs)
@@ -45,7 +54,7 @@ fn builtin_add<'p>(args: &[Val<'p>]) -> Val<'p> {
     }
 }
 
-fn builtin_mul<'p>(args: &[Val<'p>]) -> Val<'p> {
+fn builtin_mul<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     assert!(args.len() == 2, "Builtin [mul]: wrong number of args");
     if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
         Val::Int(lhs * rhs)
@@ -54,7 +63,7 @@ fn builtin_mul<'p>(args: &[Val<'p>]) -> Val<'p> {
     }
 }
 
-fn builtin_sub<'p>(args: &[Val<'p>]) -> Val<'p> {
+fn builtin_sub<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     assert!(args.len() == 2, "Builtin [sub]: wrong number of args");
     if let (Val::Int(lhs), Val::Int(rhs)) = (&args[0], &args[1]) {
         Val::Int(lhs - rhs)
@@ -92,28 +101,24 @@ fn builtins() -> &'static [(&'static str, Builtin)] {
     ]
 }
 
-fn run(input: &str) -> i64 {
+fn run(input: &str) -> (i64, Option<String>) {
     println!("parsing...");
     let (_, mut bin) = parse(input).unwrap();
     println!("parsed!\n");
 
     bin.builtins = builtins();
+    bin.output = Some(String::new());
 
     println!("checking...");
-    let bin = check(bin);
+    let mut bin = check(bin);
     println!("checked!\n");
 
     println!("evaling...");
-    let out = eval_program(&bin);
+    let out = bin.eval();
     println!("evaled!");
+    println!("{}", out);
 
-    print_val(&out);
-
-    if let Val::Int(int) = out {
-        int
-    } else {
-        panic!("main must evaluate to an int!");
-    }
+    (out, bin.output)
 }
 
 //
@@ -140,8 +145,9 @@ fn run(input: &str) -> i64 {
 
 #[derive(Debug, Clone)]
 struct Program<'p> {
-    main: Function<'p>,
+    main: Option<Function<'p>>,
     builtins: &'static [(&'static str, Builtin)],
+    output: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +192,7 @@ enum Item<'p> {
 struct Builtin {
     name: &'static str,
     args: &'static [&'static str],
-    func: for<'p> fn(args: &[Val<'p>]) -> Val<'p>,
+    func: for<'e, 'p> fn(args: &[Val<'e, 'p>]) -> Val<'e, 'p>,
 }
 
 impl fmt::Debug for Builtin {
@@ -200,8 +206,9 @@ fn parse(i: &str) -> IResult<&str, Program> {
     Ok((
         i,
         Program {
-            main,
+            main: Some(main),
             builtins: &[],
+            output: None,
         },
     ))
 }
@@ -421,7 +428,7 @@ fn check(mut program: Program) -> Program {
         .map(|(name, _)| (*name, ()))
         .collect();
     let mut envs = vec![CheckEnv { vars: builtins }];
-    check_func(&mut program.main, &mut envs);
+    check_func(program.main.as_mut().unwrap(), &mut envs);
     program
 }
 
@@ -510,181 +517,238 @@ fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut 
 //
 
 #[derive(Debug, Clone)]
-enum Val<'p> {
+enum Val<'e, 'p> {
     Int(i64),
     Str(&'p str),
     Bool(bool),
     Empty(()),
-    Func(Closure<'p>),
+    Func(Closure<'e, 'p>),
     Builtin(Builtin),
 }
 
 #[derive(Debug, Clone)]
-struct Closure<'p> {
-    func: &'p Function<'p>,
-    captures: HashMap<&'p str, Val<'p>>,
+struct Closure<'e, 'p> {
+    func: &'e Function<'p>,
+    captures: HashMap<&'p str, Val<'e, 'p>>,
 }
 
 #[derive(Debug, Clone)]
-struct Env<'p> {
-    vals: HashMap<&'p str, Val<'p>>,
+struct Env<'e, 'p> {
+    vals: HashMap<&'p str, Val<'e, 'p>>,
 }
 
-fn eval_program<'p>(program: &'p Program<'p>) -> Val<'p> {
-    let builtins = program
-        .builtins
-        .iter()
-        .map(|(name, builtin)| (*name, Val::Builtin(builtin.clone())))
-        .collect();
-    let mut envs = vec![Env { vals: builtins }];
-    eval_func(&program.main, Vec::new(), HashMap::new(), &mut envs)
-}
+impl<'p> Program<'p> {
+    fn eval(&mut self) -> i64 {
+        let builtins = self
+            .builtins
+            .iter()
+            .map(|(_, builtin)| (builtin.name, Val::Builtin(builtin.clone())))
+            .collect();
 
-fn eval_func<'p>(
-    func: &'p Function<'p>,
-    args: Vec<Val<'p>>,
-    captures: HashMap<&'p str, Val<'p>>,
-    envs: &mut Vec<Env<'p>>,
-) -> Val<'p> {
-    assert!(
-        func.args.len() == args.len(),
-        "mismatched argument count for fn {} (expected {}, got {})",
-        func.name,
-        func.args.len(),
-        args.len(),
-    );
+        let main = self.main.take().unwrap();
+        let mut envs = vec![Env { vals: builtins }];
+        let out = self.eval_func(&main, Vec::new(), HashMap::new(), &mut envs);
 
-    let mut vals = func
-        .args
-        .iter()
-        .copied()
-        .zip(args.into_iter())
-        .collect::<HashMap<_, _>>();
-    assert!(
-        vals.len() == func.args.len(),
-        "duplicate arg names for fn {}",
-        func.name,
-    );
-
-    vals.extend(captures.into_iter());
-
-    envs.push(Env { vals });
-
-    for stmt in &func.stmts {
-        match stmt {
-            Stmt::Let { name, expr } => {
-                let val = eval_expr(expr, envs);
-                envs.last_mut().unwrap().vals.insert(*name, val);
-            }
-            Stmt::Func { func } => {
-                let captures = func
-                    .captures
-                    .iter()
-                    .map(|&var| (var, eval_resolve_var(var, envs)))
-                    .collect();
-
-                envs.last_mut()
-                    .unwrap()
-                    .vals
-                    .insert(func.name, Val::Func(Closure { captures, func }));
-            }
-            Stmt::Print { expr } => {
-                let val = eval_expr(expr, envs);
-                print_val(&val);
-            }
-            Stmt::Ret { expr } => {
-                let val = eval_expr(expr, envs);
-                envs.pop();
-                return val;
-            }
+        if let Val::Int(int) = out {
+            self.main = Some(main);
+            int
+        } else {
+            panic!("main must evaluate to an int!");
         }
     }
 
-    panic!(
-        "Ran out of statements to evaulate for function {}",
-        func.name
-    );
-}
+    fn eval_func<'e>(
+        &mut self,
+        func: &'e Function<'p>,
+        args: Vec<Val<'e, 'p>>,
+        captures: HashMap<&'p str, Val<'e, 'p>>,
+        envs: &mut Vec<Env<'e, 'p>>,
+    ) -> Val<'e, 'p> {
+        assert!(
+            func.args.len() == args.len(),
+            "mismatched argument count for fn {} (expected {}, got {})",
+            func.name,
+            func.args.len(),
+            args.len(),
+        );
 
-fn eval_expr<'p>(expr: &'p Expr<'p>, envs: &mut Vec<Env<'p>>) -> Val<'p> {
-    match expr {
-        Expr::Call {
-            func: func_name,
-            args,
-        } => {
-            let func = eval_resolve_var(func_name, envs);
-            let evaled_args = args.iter().map(|expr| eval_expr(expr, envs)).collect();
+        let mut vals = func
+            .args
+            .iter()
+            .copied()
+            .zip(args.into_iter())
+            .collect::<HashMap<_, _>>();
+        assert!(
+            vals.len() == func.args.len(),
+            "duplicate arg names for fn {}",
+            func.name,
+        );
 
-            match func {
-                Val::Func(closure) => eval_func(closure.func, evaled_args, closure.captures, envs),
-                Val::Builtin(builtin) => (builtin.func)(&evaled_args),
-                _ => {
-                    panic!("Tried to call a non-function: {}", func_name);
+        vals.extend(captures.into_iter());
+
+        envs.push(Env { vals });
+
+        for stmt in &func.stmts {
+            match stmt {
+                Stmt::Let { name, expr } => {
+                    let val = self.eval_expr(expr, envs);
+                    envs.last_mut().unwrap().vals.insert(*name, val);
+                }
+                Stmt::Func { func } => {
+                    let captures = func
+                        .captures
+                        .iter()
+                        .map(|&var| (var, self.eval_resolve_var(var, envs)))
+                        .collect();
+
+                    envs.last_mut()
+                        .unwrap()
+                        .vals
+                        .insert(func.name, Val::Func(Closure { captures, func }));
+                }
+                Stmt::Print { expr } => {
+                    let val = self.eval_expr(expr, envs);
+                    self.print_val(&val);
+                }
+                Stmt::Ret { expr } => {
+                    let val = self.eval_expr(expr, envs);
+                    envs.pop();
+                    return val;
                 }
             }
         }
-        Expr::Var(var) => eval_resolve_var(var, envs),
-        Expr::Lit(lit) => match lit {
-            Literal::Int(val) => Val::Int(*val),
-            Literal::Str(val) => Val::Str(*val),
-            Literal::Bool(val) => Val::Bool(*val),
-            Literal::Empty(val) => Val::Empty(*val),
-        },
+
+        panic!(
+            "Ran out of statements to evaulate for function {}",
+            func.name
+        );
+    }
+
+    fn eval_expr<'e>(&mut self, expr: &Expr<'p>, envs: &mut Vec<Env<'e, 'p>>) -> Val<'e, 'p> {
+        match expr {
+            Expr::Call {
+                func: func_name,
+                args,
+            } => {
+                let func = self.eval_resolve_var(func_name, envs);
+                let evaled_args = args.iter().map(|expr| self.eval_expr(expr, envs)).collect();
+
+                match func {
+                    Val::Func(closure) => {
+                        self.eval_func(closure.func, evaled_args, closure.captures, envs)
+                    }
+                    Val::Builtin(builtin) => (builtin.func)(&evaled_args),
+                    _ => {
+                        panic!("Tried to call a non-function: {}", func_name);
+                    }
+                }
+            }
+            Expr::Var(var) => self.eval_resolve_var(var, envs),
+            Expr::Lit(lit) => match lit {
+                Literal::Int(val) => Val::Int(*val),
+                Literal::Str(val) => Val::Str(*val),
+                Literal::Bool(val) => Val::Bool(*val),
+                Literal::Empty(val) => Val::Empty(*val),
+            },
+        }
+    }
+
+    fn eval_resolve_var<'e>(&mut self, var: &'p str, envs: &mut Vec<Env<'e, 'p>>) -> Val<'e, 'p> {
+        for env in envs.iter().rev() {
+            if let Some(val) = env.vals.get(var) {
+                return val.clone();
+            }
+        }
+        panic!("Use of undefined var: {}", var);
+    }
+
+    fn print_val<'e>(&mut self, val: &Val<'e, 'p>) {
+        let string = self.format_val(val, 0);
+        println!("{}", string);
+
+        if let Some(output) = self.output.as_mut() {
+            output.push_str(&string);
+            output.push_str("\n");
+        }
+    }
+
+    fn format_val<'e>(&mut self, val: &Val<'e, 'p>, indent: usize) -> String {
+        match val {
+            Val::Int(int) => {
+                format!("{}", int)
+            }
+            Val::Str(string) => {
+                format!("{}", string)
+            }
+            Val::Bool(boolean) => {
+                format!("{}", boolean)
+            }
+            Val::Empty(_) => {
+                format!("()")
+            }
+            Val::Func(closure) => {
+                let mut f = String::new();
+                write!(f, "fn {}(", closure.func.name).unwrap();
+                for (i, arg) in closure.func.args.iter().enumerate() {
+                    if i != 0 {
+                        write!(f, ", ").unwrap();
+                    }
+                    write!(f, "{}", arg).unwrap();
+                }
+                writeln!(f, ")").unwrap();
+
+                if !closure.captures.is_empty() {
+                    let indent = indent + 2;
+                    write!(f, "{:indent$}captures:", "", indent = indent).unwrap();
+                    for (arg, capture) in &closure.captures {
+                        writeln!(f, "").unwrap();
+                        let sub_indent = indent + arg.len() + 2;
+                        let val = self.format_val(capture, sub_indent);
+                        write!(f, "{:indent$}- {}: {}", "", arg, val, indent = indent).unwrap();
+                    }
+                }
+                f
+            }
+            Val::Builtin(builtin) => {
+                let mut f = String::new();
+                write!(f, "builtin {}(", builtin.name).unwrap();
+                for (i, arg) in builtin.args.iter().enumerate() {
+                    if i != 0 {
+                        write!(f, ", ").unwrap();
+                    }
+                    write!(f, "{}", arg).unwrap();
+                }
+                writeln!(f, ")").unwrap();
+                f
+            }
+        }
     }
 }
 
-fn eval_resolve_var<'p>(var: &'p str, envs: &mut Vec<Env<'p>>) -> Val<'p> {
-    for env in envs.iter().rev() {
-        if let Some(val) = env.vals.get(var) {
-            return val.clone();
-        }
-    }
-    panic!("Use of undefined var: {}", var);
-}
-
-fn print_val(val: &Val) {
-    match val {
-        Val::Int(int) => {
-            println!("{}", int);
-        }
-        Val::Str(string) => {
-            println!("{}", string);
-        }
-        Val::Bool(boolean) => {
-            println!("{}", boolean);
-        }
-        Val::Empty(_) => {
-            println!("()");
-        }
-        Val::Func(closure) => {
-            print!("fn {}(", closure.func.name);
-            for (i, arg) in closure.func.args.iter().enumerate() {
-                if i != 0 {
-                    print!(", ");
-                }
-                print!("{}", arg);
-            }
-            println!(")");
-
-            if !closure.captures.is_empty() {
-                println!("  captures:");
-                for (arg, capture) in closure.func.args.iter().zip(closure.captures.iter()) {
-                    println!("  - {}: ", arg);
-                }
-            }
-        }
-        Val::Builtin(builtin) => {
-            print!("builtin {}(", builtin.name);
-            for (i, arg) in builtin.args.iter().enumerate() {
-                if i != 0 {
-                    print!(", ");
-                }
-                print!("{}", arg);
-            }
-            println!(")");
-        }
-    }
-}
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
 
 #[cfg(test)]
 mod test {
@@ -696,7 +760,7 @@ mod test {
             ret sub(mul(add(4, 7), 13), 9)
         "#;
 
-        let result = run(program);
+        let (result, _output) = run(program);
         assert_eq!(result, (4 + 7) * 13 - 9);
     }
 
@@ -714,7 +778,7 @@ mod test {
             ret higher(doit)
         "#;
 
-        let result = run(program);
+        let (result, _output) = run(program);
         assert_eq!(result, 123);
     }
 
@@ -732,7 +796,7 @@ mod test {
             ret higher(doit)
         "#;
 
-        let result = run(program);
+        let (result, _output) = run(program);
         assert_eq!(result, 777);
     }
 
@@ -753,7 +817,7 @@ mod test {
             ret higher(doit)
         "#;
 
-        let result = run(program);
+        let (result, _output) = run(program);
         assert_eq!(result, 666);
     }
 
@@ -771,7 +835,7 @@ mod test {
             ret mask(33)
         "#;
 
-        let result = run(program);
+        let (result, _output) = run(program);
         assert_eq!(result, 66);
     }
 
@@ -800,7 +864,7 @@ mod test {
             ret add(add(a, b), c)
         "#;
 
-        let result = run(program);
+        let (result, _output) = run(program);
         assert_eq!(result, 17);
     }
 
@@ -811,7 +875,7 @@ mod test {
         }
         "#;
 
-        let result = run(program);
+        let (result, _output) = run(program);
         assert_eq!(result, -1);
     }
 
@@ -840,8 +904,9 @@ mod test {
             ret condition(printTrue, printFalse)
         "#;
 
-        let result = run(program);
+        let (result, output) = run(program);
         assert_eq!(result, 70);
+        assert_eq!(output.unwrap(), "1\n");
     }
 
     #[test]
@@ -854,7 +919,7 @@ mod test {
             ret add(add(add(_x, __y), _0), _x_y__z_)
         "#;
 
-        let result = run(program);
+        let (result, _output) = run(program);
         assert_eq!(result, 66 + 55 + 44 + 33);
     }
 
@@ -869,11 +934,30 @@ mod test {
             let f = false
             let g = ()
 
+            print a
+            print b
+            print c
+            print d
+            print e
+            print f
+            print g
+
             ret a
         "#;
 
-        let result = run(program);
+        let (result, output) = run(program);
         assert_eq!(result, 66);
+        assert_eq!(
+            output.unwrap(),
+            r#"66
+-55
+hello
+
+true
+false
+()
+"#
+        );
     }
 
     #[test]
@@ -883,8 +967,9 @@ mod test {
             ret 1
         "#;
 
-        let result = run(program);
+        let (result, output) = run(program);
         assert_eq!(result, 1);
+        assert_eq!(output.unwrap(), "hello\n");
     }
 
     #[test]
@@ -923,7 +1008,7 @@ mod test {
             ret result
         "#;
 
-        let result = run(program);
+        let (result, _output) = run(program);
         assert_eq!(result, 99);
     }
 }

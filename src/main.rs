@@ -13,26 +13,26 @@ use nom::{
 };
 
 const MAIN_PROGRAM: &str = r#"
-    fn true(if, else) {
-        ret if()
-    }
-    fn false(if, else) {
-        ret else()
-    }
-
-    let condition = true
-    let capture = 69
-
-    fn printTrue() {
-        print 1
-        ret add(capture, 1)
-    }
-    fn printFalse() {
-        print 0
-        ret add(capture, 0)
+    fn double(x) {
+        fn two(val) {
+            ret x(x(val))
+        }
+        ret two
     }
 
-    ret condition(printTrue, printFalse)
+    fn succ(x) {
+        ret add(x, 1)
+    }
+
+    let add_two = double(succ)
+    let add_four = double(add_two)
+    let add_eight = double(add_four)
+
+    print add_two(1)
+    print add_four(1)
+    print add_eight(1)
+
+    ret 0
 "#;
 
 fn main() {
@@ -451,10 +451,21 @@ fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut 
             }
             panic!("Compile Error: Use of undefined variable {}", var_name);
         }
-        Expr::Call { args, .. } => {
-            for expr in args {
-                check_expr(expr, envs, captures);
+        Expr::Call { func, args } => {
+            for (depth, env) in envs.iter().rev().enumerate() {
+                if env.vars.get(func).is_some() {
+                    if depth == 0 {
+                        // Do nothing, not a capture
+                    } else {
+                        captures.insert(func);
+                    }
+                    for expr in args {
+                        check_expr(expr, envs, captures);
+                    }
+                    return;
+                }
             }
+            panic!("Compile Error: Call of undefined function {}", func);
         }
     }
 }
@@ -714,6 +725,35 @@ mod test {
 
         let result = run(program);
         assert_eq!(result, 66);
+    }
+
+    #[test]
+    fn test_call_capture() {
+        let program = r#"
+            fn double(x) {
+                fn two(val) {
+                    ret x(x(val))
+                }
+                ret two
+            }
+
+            fn succ(x) {
+                ret add(x, 1)
+            }
+
+            let add_two = double(succ)
+            let add_four = double(add_two)
+            let add_eight = double(add_four)
+
+            let a = add_two(1)
+            let b = add_four(1)
+            let c = add_eight(1)
+
+            ret add(add(a, b), c)
+        "#;
+
+        let result = run(program);
+        assert_eq!(result, 17);
     }
 
     #[test]

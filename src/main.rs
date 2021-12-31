@@ -36,10 +36,14 @@ use nom::{
 
 const MAIN_PROGRAM: &str = r#"
 
-    if false {
-        print "goodbye world!"
-    } else {
-        print "hello world!"
+    loop {
+        if false {
+            break
+        } else {
+            print "hello"
+            continue
+        }
+        
     }
 
     ret 0
@@ -113,6 +117,9 @@ enum Stmt<'p> {
         stmts: Vec<Stmt<'p>>,
         else_stmts: Vec<Stmt<'p>>,
     },
+    Loop {
+        stmts: Vec<Stmt<'p>>,
+    },
     Let {
         name: &'p str,
         expr: Expr<'p>,
@@ -126,6 +133,8 @@ enum Stmt<'p> {
     Print {
         expr: Expr<'p>,
     },
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +158,7 @@ enum Item<'p> {
     Func(&'p str, Vec<&'p str>),
     Stmt(Stmt<'p>),
     If(Expr<'p>),
+    Loop,
     Else,
     End,
 }
@@ -253,6 +263,17 @@ fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, (Block<'p>, Item<'p>)> {
                     else_stmts,
                 })
             }
+            Item::Loop => {
+                let (new_i, (Block(block_stmts), terminal)) = parse_block(i)?;
+                i = new_i;
+
+                assert!(
+                    matches!(terminal, Item::End),
+                    "Parse Error: loop ending eith an `else`"
+                );
+
+                stmts.push(Stmt::Loop { stmts: block_stmts });
+            }
             Item::Stmt(stmt) => {
                 stmts.push(stmt);
             }
@@ -270,6 +291,7 @@ fn item(i: &str) -> IResult<&str, Item> {
         item_else,
         item_end,
         item_if,
+        item_loop,
         item_func,
         item_stmt,
     ))(i)
@@ -315,13 +337,23 @@ fn item_else(i: &str) -> IResult<&str, Item> {
     Ok((i, Item::Else))
 }
 
+fn item_loop(i: &str) -> IResult<&str, Item> {
+    let (i, _) = tag("loop")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("{")(i)?;
+    Ok((i, Item::Loop))
+}
+
 fn item_end(i: &str) -> IResult<&str, Item> {
     let (i, _) = tag("}")(i)?;
     Ok((i, Item::End))
 }
 
 fn item_stmt(i: &str) -> IResult<&str, Item> {
-    map(alt((stmt_let, stmt_ret, stmt_print)), Item::Stmt)(i)
+    map(
+        alt((stmt_break, stmt_continue, stmt_let, stmt_ret, stmt_print)),
+        Item::Stmt,
+    )(i)
 }
 
 fn stmt_let(i: &str) -> IResult<&str, Stmt> {
@@ -342,6 +374,16 @@ fn stmt_ret(i: &str) -> IResult<&str, Stmt> {
     let (i, expr) = expr(i)?;
 
     Ok((i, Stmt::Ret { expr }))
+}
+
+fn stmt_break(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = tag("break")(i)?;
+    Ok((i, Stmt::Break))
+}
+
+fn stmt_continue(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = tag("continue")(i)?;
+    Ok((i, Stmt::Continue))
 }
 
 fn stmt_print(i: &str) -> IResult<&str, Stmt> {
@@ -484,9 +526,8 @@ fn check_block<'p>(
                 check_block(stmts, envs, captures);
                 check_block(else_stmts, envs, captures);
             }
-            Stmt::Let { name, expr } => {
-                check_expr(expr, envs, captures);
-                envs.last_mut().unwrap().vars.insert(name, ());
+            Stmt::Loop { stmts } => {
+                check_block(stmts, envs, captures);
             }
             Stmt::Func { func } => {
                 // We push a func's name after checking it to avoid
@@ -495,8 +536,15 @@ fn check_block<'p>(
                 check_func(func, envs);
                 envs.last_mut().unwrap().vars.insert(func.name, ());
             }
+            Stmt::Let { name, expr } => {
+                check_expr(expr, envs, captures);
+                envs.last_mut().unwrap().vars.insert(name, ());
+            }
             Stmt::Ret { expr } | Stmt::Print { expr } => {
                 check_expr(expr, envs, captures);
+            }
+            Stmt::Break | Stmt::Continue => {
+                // Nothing to analyze
             }
         }
     }
@@ -698,6 +746,13 @@ struct Env<'e, 'p> {
     vals: HashMap<&'p str, Val<'e, 'p>>,
 }
 
+enum ControlFlow<'e, 'p> {
+    Return(Val<'e, 'p>),
+    Break,
+    Continue,
+    None,
+}
+
 impl<'p> Program<'p> {
     fn eval(&mut self) -> i64 {
         let builtins = self
@@ -751,13 +806,20 @@ impl<'p> Program<'p> {
         let result = self.eval_block(&func.stmts, envs);
         envs.pop();
 
-        if let Some(val) = result {
-            val
-        } else {
-            panic!(
-                "Runtime Error: Ran out of statements to evaulate for function {}",
-                func.name
-            );
+        match result {
+            ControlFlow::Return(val) => val,
+            ControlFlow::Break => {
+                panic!("Runtime Error: break used outside of a loop");
+            }
+            ControlFlow::Continue => {
+                panic!("Runtime Error: continue used outside of a loop");
+            }
+            ControlFlow::None => {
+                panic!(
+                    "Runtime Error: function didn't return a value: {}",
+                    func.name
+                );
+            }
         }
     }
 
@@ -765,7 +827,7 @@ impl<'p> Program<'p> {
         &mut self,
         stmts: &'e [Stmt<'p>],
         envs: &mut Vec<Env<'e, 'p>>,
-    ) -> Option<Val<'e, 'p>> {
+    ) -> ControlFlow<'e, 'p> {
         for stmt in stmts {
             match stmt {
                 Stmt::Let { name, expr } => {
@@ -800,9 +862,21 @@ impl<'p> Program<'p> {
                         }
                     };
 
-                    if result.is_some() {
-                        // Block evaled a return, bubble it up
-                        return result;
+                    match result {
+                        ControlFlow::None => { /* do nothing */ }
+                        // All other control flow ends the block immediately
+                        flow => return flow,
+                    }
+                }
+                Stmt::Loop { stmts } => {
+                    loop {
+                        let result = self.eval_block(stmts, envs);
+                        match result {
+                            ControlFlow::Return(val) => return ControlFlow::Return(val),
+                            ControlFlow::Break => break,
+                            ControlFlow::Continue => continue,
+                            ControlFlow::None => { /* do nothing */ }
+                        }
                     }
                 }
                 Stmt::Print { expr } => {
@@ -811,11 +885,19 @@ impl<'p> Program<'p> {
                 }
                 Stmt::Ret { expr } => {
                     let val = self.eval_expr(expr, envs);
-                    return Some(val);
+                    return ControlFlow::Return(val);
+                }
+                Stmt::Break => {
+                    return ControlFlow::Break;
+                }
+                Stmt::Continue => {
+                    return ControlFlow::Continue;
                 }
             }
         }
-        None
+
+        // Nothing special happened, continue execution
+        ControlFlow::None
     }
 
     fn eval_expr<'e>(&mut self, expr: &Expr<'p>, envs: &mut Vec<Env<'e, 'p>>) -> Val<'e, 'p> {
@@ -1004,6 +1086,22 @@ mod test {
 
     #[test]
     #[should_panic(expected = "Parse Error")]
+    fn parse_fail_else_loop() {
+        let program = r#"
+            loop {
+                break
+            } else {
+                print "oh no"
+            }
+            
+            ret 0
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Parse Error")]
     fn parse_fail_else_else() {
         let program = r#"
             if true {
@@ -1116,6 +1214,28 @@ mod test {
                 print "hello"
             }
             ret f()
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_break_no_loop() {
+        let program = r#"
+            continue
+            ret 0
+        "#;
+
+        let (_result, _output) = run(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime Error")]
+    fn eval_fail_continue_no_loop() {
+        let program = r#"
+            break
+            ret 0
         "#;
 
         let (_result, _output) = run(program);
@@ -1600,5 +1720,39 @@ false
 
         let (result, _output) = run(program);
         assert_eq!(result, 99);
+    }
+
+    #[test]
+    fn test_loops_no_looping() {
+        let program = r#"
+            loop {
+                if true {
+                    print "yay1"
+                    break
+                } else {
+                    continue
+                }
+            }
+
+            let x = 17
+            fn do_stuff() {
+                loop {
+                    print x
+                    ret 2
+                }
+            }
+
+            let x = 12
+            ret do_stuff()
+        "#;
+
+        let (result, output) = run(program);
+        assert_eq!(result, 2);
+        assert_eq!(
+            output.unwrap(),
+            r#"yay1
+17
+"#
+        );
     }
 }

@@ -5,7 +5,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
     character::complete::{alpha1, alphanumeric1, char, space0, space1},
-    combinator::{map, recognize},
+    combinator::{map, recognize, rest},
     error::ParseError,
     multi::{many0, separated_list0},
     sequence::pair,
@@ -13,6 +13,7 @@ use nom::{
 };
 
 const MAIN_PROGRAM: &str = r#"
+    // test
     let x = true
     let y = 2
 
@@ -209,6 +210,7 @@ enum Literal<'p> {
 
 // Parse intermediates
 enum Item<'p> {
+    Comment(&'p str),
     Func(&'p str, Vec<&'p str>),
     Stmt(Stmt<'p>),
     If(Expr<'p>),
@@ -292,13 +294,23 @@ fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, Block<'p>> {
             Item::Stmt(stmt) => {
                 stmts.push(stmt);
             }
+            Item::Comment(_comment) => {
+                // discard it
+            }
             Item::End => return Ok((i, Block(stmts))),
         }
     }
 }
 
 fn item(i: &str) -> IResult<&str, Item> {
-    alt((item_func, item_if, item_end, item_stmt))(i)
+    alt((item_comment, item_end, item_func, item_if, item_stmt))(i)
+}
+
+fn item_comment(i: &str) -> IResult<&str, Item> {
+    let (i, _) = tag("//")(i)?;
+    let (i, comment) = rest(i)?;
+
+    Ok((i, Item::Comment(comment)))
 }
 
 fn item_func(i: &str) -> IResult<&str, Item> {
@@ -382,31 +394,28 @@ fn expr_var(i: &str) -> IResult<&str, Expr> {
 }
 
 fn expr_lit(i: &str) -> IResult<&str, Expr> {
-    map(
-        alt((expr_lit_int, expr_lit_str, expr_lit_bool, expr_lit_empty)),
-        Expr::Lit,
-    )(i)
+    map(alt((lit_int, lit_str, lit_bool, lit_empty)), Expr::Lit)(i)
 }
 
-fn expr_lit_int(i: &str) -> IResult<&str, Literal> {
+fn lit_int(i: &str) -> IResult<&str, Literal> {
     map(nom::character::complete::i64, Literal::Int)(i)
 }
 
-fn expr_lit_str(i: &str) -> IResult<&str, Literal> {
+fn lit_str(i: &str) -> IResult<&str, Literal> {
     let (i, _) = tag("\"")(i)?;
     let (i, string) = take_until("\"")(i)?;
     let (i, _) = tag("\"")(i)?;
     Ok((i, Literal::Str(string)))
 }
 
-fn expr_lit_bool(i: &str) -> IResult<&str, Literal> {
+fn lit_bool(i: &str) -> IResult<&str, Literal> {
     alt((
         map(tag("true"), |_| Literal::Bool(true)),
         map(tag("false"), |_| Literal::Bool(false)),
     ))(i)
 }
 
-fn expr_lit_empty(i: &str) -> IResult<&str, Literal> {
+fn lit_empty(i: &str) -> IResult<&str, Literal> {
     map(tag("()"), |_| Literal::Empty(()))(i)
 }
 
@@ -832,6 +841,40 @@ impl<'p> Program<'p> {
 #[cfg(test)]
 mod test {
     use super::run;
+
+    #[test]
+    fn test_comments() {
+        let program = r#"
+            // Hello!
+            let x = 0
+            // let x = 2
+            // print "fuck!"
+            print "yay"
+            
+            let whatever = 9
+
+            // fn whatever() {
+            //   ret 7
+            // }
+            //
+
+            // }
+
+            print whatever
+
+            // ret -1
+            ret x
+        "#;
+
+        let (result, output) = run(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"yay
+9
+"#
+        );
+    }
 
     #[test]
     fn test_if() {

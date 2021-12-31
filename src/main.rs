@@ -35,40 +35,20 @@ use nom::{
 //
 
 const MAIN_PROGRAM: &str = r#"
-    let x = 10
-
-    fn remembers_original() {
-        ret x
-    }
-    loop {
-        fn remembers_previous() {
-            ret x
-        }
-
-        // Exit the loop at 0
-        if eq(x, 0) {
-            break
-        }
-        set x = sub(x, 1)
-
-        // Skip 2, no one likes 2
-        if eq(x, 2) {
-            continue
-        }
-
-        print "loop!"
-        print remembers_original()
-        print remembers_previous()
-        print x
+    fn square(x: Int) -> Int {
+        ret mul(x, x)
     }
 
-    ret 0
+    let x: Int = 0
+
+    ret x
 "#;
 
 fn main() {
-    run(MAIN_PROGRAM);
+    run_typed(MAIN_PROGRAM);
 }
 
+#[allow(dead_code)]
 fn run(input: &str) -> (i64, Option<String>) {
     println!("parsing...");
     let (_, mut bin) = parse(input).expect("Parse Error");
@@ -76,9 +56,32 @@ fn run(input: &str) -> (i64, Option<String>) {
 
     bin.builtins = builtins();
     bin.output = Some(String::new());
+    bin.typed = false;
 
     println!("checking...");
-    let mut bin = check(bin);
+    let mut bin = bin.check();
+    println!("checked!\n");
+
+    println!("evaling...");
+    let out = bin.eval();
+    println!("evaled!");
+    println!("{}", out);
+
+    (out, bin.output)
+}
+
+#[allow(dead_code)]
+fn run_typed(input: &str) -> (i64, Option<String>) {
+    println!("parsing...");
+    let (_, mut bin) = parse(input).expect("Parse Error");
+    println!("parsed!\n");
+
+    bin.builtins = builtins();
+    bin.output = Some(String::new());
+    bin.typed = true;
+
+    println!("checking...");
+    let mut bin = bin.check();
     println!("checked!\n");
 
     println!("evaling...");
@@ -114,15 +117,17 @@ fn run(input: &str) -> (i64, Option<String>) {
 #[derive(Debug, Clone)]
 struct Program<'p> {
     main: Option<Function<'p>>,
-    builtins: &'static [Builtin],
+    typed: bool,
+    builtins: Vec<Builtin>,
     output: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct Function<'p> {
     name: &'p str,
-    args: Vec<&'p str>,
+    args: Vec<VarDecl<'p>>,
     stmts: Vec<Stmt<'p>>,
+    ty: Ty,
     captures: HashSet<&'p str>,
 }
 
@@ -137,7 +142,7 @@ enum Stmt<'p> {
         stmts: Vec<Stmt<'p>>,
     },
     Let {
-        name: &'p str,
+        name: VarDecl<'p>,
         expr: Expr<'p>,
     },
     Set {
@@ -172,10 +177,27 @@ enum Literal<'p> {
     Empty(()),
 }
 
+impl Literal<'_> {
+    fn ty(&self) -> Ty {
+        match self {
+            Literal::Int(_) => Ty::Int,
+            Literal::Str(_) => Ty::Str,
+            Literal::Bool(_) => Ty::Bool,
+            Literal::Empty(_) => Ty::Empty,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VarDecl<'p> {
+    ident: &'p str,
+    ty: Ty,
+}
+
 // Parse intermediates
 enum Item<'p> {
     Comment(&'p str),
-    Func(&'p str, Vec<&'p str>),
+    Func(&'p str, Vec<VarDecl<'p>>, Ty),
     Stmt(Stmt<'p>),
     If(Expr<'p>),
     Loop,
@@ -189,6 +211,7 @@ struct Block<'p>(Vec<Stmt<'p>>);
 struct Builtin {
     name: &'static str,
     args: &'static [&'static str],
+    ty: Ty,
     func: for<'e, 'p> fn(args: &[Val<'e, 'p>]) -> Val<'e, 'p>,
 }
 
@@ -204,6 +227,10 @@ fn parse(i: &str) -> IResult<&str, Program> {
         name: "main",
         args: Vec::new(),
         stmts,
+        ty: Ty::Func {
+            arg_tys: vec![],
+            return_ty: Box::new(Ty::Int),
+        },
         captures: HashSet::new(),
     });
 
@@ -217,7 +244,8 @@ fn parse(i: &str) -> IResult<&str, Program> {
         Program {
             main,
             // other state populated by caller
-            builtins: &[],
+            typed: false,
+            builtins: Vec::new(),
             output: None,
         },
     ))
@@ -241,7 +269,7 @@ fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, (Block<'p>, Item<'p>)> {
         }
 
         match item(line)?.1 {
-            Item::Func(name, args) => {
+            Item::Func(name, args, return_ty) => {
                 let (new_i, (Block(block_stmts), terminal)) = parse_block(i)?;
                 i = new_i;
 
@@ -252,6 +280,10 @@ fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, (Block<'p>, Item<'p>)> {
 
                 stmts.push(Stmt::Func {
                     func: Function {
+                        ty: Ty::Func {
+                            arg_tys: args.iter().map(|decl| decl.ty.clone()).collect(),
+                            return_ty: Box::new(return_ty),
+                        },
                         name,
                         args,
                         stmts: block_stmts,
@@ -331,12 +363,24 @@ fn item_func(i: &str) -> IResult<&str, Item> {
     let (i, _) = space0(i)?;
     let (i, _) = tag("(")(i)?;
     let (i, _) = space0(i)?;
-    let (i, args) = separated_list0(char(','), padded(ident))(i)?;
+    let (i, args) = separated_list0(char(','), padded(var_decl))(i)?;
     let (i, _) = tag(")")(i)?;
+    let (i, return_ty) = if let Ok((i, return_ty)) = return_ty(i) {
+        (i, return_ty)
+    } else {
+        (i, Ty::Unknown)
+    };
     let (i, _) = space0(i)?;
     let (i, _) = tag("{")(i)?;
 
-    Ok((i, Item::Func(name, args)))
+    Ok((i, Item::Func(name, args, return_ty)))
+}
+
+fn return_ty(i: &str) -> IResult<&str, Ty> {
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("->")(i)?;
+    let (i, _) = space0(i)?;
+    ty_decl(i)
 }
 
 fn item_if(i: &str) -> IResult<&str, Item> {
@@ -386,7 +430,7 @@ fn item_stmt(i: &str) -> IResult<&str, Item> {
 fn stmt_let(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = tag("let")(i)?;
     let (i, _) = space1(i)?;
-    let (i, name) = ident(i)?;
+    let (i, name) = var_decl(i)?;
     let (i, _) = space0(i)?;
     let (i, _) = tag("=")(i)?;
     let (i, _) = space0(i)?;
@@ -478,11 +522,61 @@ fn lit_empty(i: &str) -> IResult<&str, Literal> {
     map(tag("()"), |_| Literal::Empty(()))(i)
 }
 
+fn var_decl(i: &str) -> IResult<&str, VarDecl> {
+    alt((
+        typed_ident,
+        map(ident, |id| VarDecl { ident: id, ty: Ty::Unknown } ),
+    ))(i)
+}
+
 fn ident(i: &str) -> IResult<&str, &str> {
     recognize(pair(
         alt((alpha1, tag("_"))),
         many0(alt((alphanumeric1, tag("_")))),
     ))(i)
+}
+
+fn typed_ident(i: &str) -> IResult<&str, VarDecl> {
+    let (i, id) = recognize(pair(
+        alt((alpha1, tag("_"))),
+        many0(alt((alphanumeric1, tag("_")))),
+    ))(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag(":")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, ty) = ty_decl(i)?;
+
+    Ok((i, VarDecl { ident: id, ty }))
+}
+
+fn ty_decl(i: &str) -> IResult<&str, Ty> {
+    alt((
+        ty_decl_int,
+        ty_decl_str,
+        ty_decl_empty,
+        ty_decl_bool,
+        ty_decl_func,
+    ))(i)
+}
+
+fn ty_decl_int(i: &str) -> IResult<&str, Ty> {
+    map(tag("Int"), |_| Ty::Int)(i)
+}
+fn ty_decl_str(i: &str) -> IResult<&str, Ty> {
+    map(tag("Str"), |_| Ty::Str)(i)
+}
+fn ty_decl_bool(i: &str) -> IResult<&str, Ty> {
+    map(tag("Bool"), |_| Ty::Bool)(i)
+}
+fn ty_decl_empty(i: &str) -> IResult<&str, Ty> {
+    map(tag("()"), |_| Ty::Empty)(i)
+}
+fn ty_decl_func(i: &str) -> IResult<&str, Ty> {
+    // TODO
+    map(tag("fn"), |_| Ty::Func {
+        arg_tys: Vec::new(),
+        return_ty: Box::new(Ty::Unknown),
+    })(i)
 }
 
 pub fn padded<F, T, O, E>(mut parser: F) -> impl FnMut(T) -> IResult<T, O, E>
@@ -523,114 +617,146 @@ where
 //
 //
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Ty {
+    Int,
+    Str,
+    Bool,
+    Empty,
+    Func { 
+        arg_tys: Vec<Ty>,
+        return_ty: Box<Ty>,
+    },
+    Unknown,
+}
+
 struct CheckEnv<'p> {
-    vars: HashMap<&'p str, ()>,
+    vars: HashMap<&'p str, Ty>,
 }
 
-fn check(mut program: Program) -> Program {
-    let builtins = program
-        .builtins
-        .iter()
-        .map(|builtin| (builtin.name, ()))
-        .collect();
-    let mut envs = vec![CheckEnv { vars: builtins }];
-    check_func(program.main.as_mut().unwrap(), &mut envs);
-    program
-}
+impl<'p> Program<'p> {
+    fn check(mut self) -> Self {
+        let builtins = self
+            .builtins
+            .iter()
+            .map(|builtin| (builtin.name, builtin.ty.clone()))
+            .collect();
+        let mut envs = vec![CheckEnv { vars: builtins }];
+        let mut main = self.main.take().unwrap();
+        self.check_func(&mut main, &mut envs);
+        self.main = Some(main);
+        self
+    }
 
-fn check_func<'p>(func: &mut Function<'p>, envs: &mut Vec<CheckEnv<'p>>) {
-    let vars = func.args.iter().map(|&name| (name, ())).collect();
-    envs.push(CheckEnv { vars });
-    let mut captures = HashSet::new();
+    fn check_func(&mut self, func: &mut Function<'p>, envs: &mut Vec<CheckEnv<'p>>) {
+        let vars = func.args.iter().map(|decl| (decl.ident, decl.ty.clone())).collect();
+        envs.push(CheckEnv { vars });
+        let mut captures = HashSet::new();
 
-    check_block(&mut func.stmts, envs, &mut captures);
+        self.check_block(&mut func.stmts, envs, &mut captures);
 
-    func.captures = captures;
-    envs.pop();
-}
+        func.captures = captures;
+        envs.pop();
+    }
 
-fn check_block<'p>(
-    stmts: &mut [Stmt<'p>],
-    envs: &mut Vec<CheckEnv<'p>>,
-    captures: &mut HashSet<&'p str>,
-) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::If {
-                expr,
-                stmts,
-                else_stmts,
-            } => {
-                check_expr(expr, envs, captures);
-                check_block(stmts, envs, captures);
-                check_block(else_stmts, envs, captures);
-            }
-            Stmt::Loop { stmts } => {
-                check_block(stmts, envs, captures);
-            }
-            Stmt::Func { func } => {
-                // We push a func's name after checking it to avoid
-                // infinite capture recursion. This means naive recursion
-                // is illegal.
-                check_func(func, envs);
-                envs.last_mut().unwrap().vars.insert(func.name, ());
-            }
-            Stmt::Let { name, expr } => {
-                check_expr(expr, envs, captures);
-                envs.last_mut().unwrap().vars.insert(name, ());
-            }
-            Stmt::Set { name, expr } => {
-                check_expr(expr, envs, captures);
-                let old = envs.last_mut().unwrap().vars.insert(name, ());
-                assert!(
-                    old.is_some(),
-                    "Compile Error: trying to set an undefined local variable {}",
-                    name
-                );
-            }
-            Stmt::Ret { expr } | Stmt::Print { expr } => {
-                check_expr(expr, envs, captures);
-            }
-            Stmt::Break | Stmt::Continue => {
-                // Nothing to analyze
+    fn check_block(
+        &mut self,
+        stmts: &mut [Stmt<'p>],
+        envs: &mut Vec<CheckEnv<'p>>,
+        captures: &mut HashSet<&'p str>,
+    ) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::If {
+                    expr,
+                    stmts,
+                    else_stmts,
+                } => {
+                    let cond_ty = self.check_expr(expr, envs, captures);
+                    self.check_block(stmts, envs, captures);
+                    self.check_block(else_stmts, envs, captures);
+                }
+                Stmt::Loop { stmts } => {
+                    self.check_block(stmts, envs, captures);
+                }
+                Stmt::Func { func } => {
+                    // We push a func's name after checking it to avoid
+                    // infinite capture recursion. This means naive recursion
+                    // is illegal.
+                    self.check_func(func, envs);
+                    envs.last_mut().unwrap().vars.insert(func.name, func.ty.clone());
+                }
+                Stmt::Let { name, expr } => {
+                    let expr_ty = self.check_expr(expr, envs, captures);
+                    let decl_ty = &name.ty;
+                    envs.last_mut().unwrap().vars.insert(name.ident, expr_ty);
+                }
+                Stmt::Set { name, expr } => {
+                    let expr_ty = self.check_expr(expr, envs, captures);
+                    let old = envs.last_mut().unwrap().vars.insert(name, expr_ty);
+                    assert!(
+                        old.is_some(),
+                        "Compile Error: trying to set an undefined local variable {}",
+                        name
+                    );
+                }
+                Stmt::Ret { expr } | Stmt::Print { expr } => {
+                    let expr_ty = self.check_expr(expr, envs, captures);
+                }
+                Stmt::Break | Stmt::Continue => {
+                    // Nothing to analyze
+                }
             }
         }
     }
-}
 
-fn check_expr<'p>(expr: &Expr<'p>, envs: &mut Vec<CheckEnv<'p>>, captures: &mut HashSet<&'p str>) {
-    match expr {
-        Expr::Lit(..) => {
-            // Always valid
-        }
-        Expr::Var(var_name) => {
-            for (depth, env) in envs.iter().rev().enumerate() {
-                if env.vars.get(var_name).is_some() {
-                    if depth == 0 {
-                        // Do nothing, not a capture
-                    } else {
-                        captures.insert(var_name);
-                    }
-                    return;
-                }
+    fn check_expr(
+        &mut self,
+        expr: &Expr<'p>, 
+        envs: &mut Vec<CheckEnv<'p>>, 
+        captures: &mut HashSet<&'p str>, 
+    ) -> Ty {
+        match expr {
+            Expr::Lit(lit) => {
+                return lit.ty();
             }
-            panic!("Compile Error: Use of undefined variable {}", var_name);
-        }
-        Expr::Call { func, args } => {
-            for (depth, env) in envs.iter().rev().enumerate() {
-                if env.vars.get(func).is_some() {
-                    if depth == 0 {
-                        // Do nothing, not a capture
-                    } else {
-                        captures.insert(func);
+            Expr::Var(var_name) => {
+                for (depth, env) in envs.iter().rev().enumerate() {
+                    if let Some(ty) = env.vars.get(var_name) {
+                        if depth == 0 {
+                            // Do nothing, not a capture
+                        } else {
+                            captures.insert(var_name);
+                        }
+                        return ty.clone();
                     }
-                    for expr in args {
-                        check_expr(expr, envs, captures);
-                    }
-                    return;
                 }
+                panic!("Compile Error: Use of undefined variable {}", var_name);
             }
-            panic!("Compile Error: Call of undefined function {}", func);
+            Expr::Call { func, args } => {
+                for (depth, env) in envs.iter().rev().enumerate() {
+                    if let Some(func_ty) = env.vars.get(func) {
+                        let (arg_tys, return_ty) = if let Ty::Func { arg_tys, return_ty } = func_ty {
+                            (arg_tys.clone(), (**return_ty).clone())
+                        } else if self.typed {
+                            panic!("Compile Error: Function must have Func type!");
+                        } else {
+                            (Vec::new(), Ty::Unknown)
+                        };
+
+                        if depth == 0 {
+                            // Do nothing, not a capture
+                        } else {
+                            captures.insert(func);
+                        }
+                        for expr in args {
+                            self.check_expr(expr, envs, captures);
+                        }
+                        return return_ty
+                    }
+                }
+                panic!("Compile Error: Call of undefined function {}", func);
+            }
         }
     }
 }
@@ -721,31 +847,51 @@ fn builtin_not<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     }
 }
 
-fn builtins() -> &'static [Builtin] {
-    &[
+fn builtins() -> Vec<Builtin> {
+    vec![
         Builtin {
             name: "add",
             args: &["lhs", "rhs"],
+            ty: Ty::Func {
+                arg_tys: vec![Ty::Int, Ty::Int],
+                return_ty: Box::new(Ty::Int),
+            },
             func: builtin_add,
         },
         Builtin {
             name: "sub",
             args: &["lhs", "rhs"],
+            ty: Ty::Func {
+                arg_tys: vec![Ty::Int, Ty::Int],
+                return_ty: Box::new(Ty::Int),
+            },
             func: builtin_sub,
         },
         Builtin {
             name: "mul",
             args: &["lhs", "rhs"],
+            ty: Ty::Func {
+                arg_tys: vec![Ty::Int, Ty::Int],
+                return_ty: Box::new(Ty::Int),
+            },
             func: builtin_mul,
         },
         Builtin {
             name: "eq",
             args: &["lhs", "rhs"],
+            ty: Ty::Func {
+                arg_tys: vec![Ty::Int, Ty::Int],
+                return_ty: Box::new(Ty::Bool),
+            },
             func: builtin_eq,
         },
         Builtin {
             name: "not",
             args: &["rhs"],
+            ty: Ty::Func {
+                arg_tys: vec![Ty::Bool],
+                return_ty: Box::new(Ty::Bool),
+            },
             func: builtin_not,
         },
     ]
@@ -781,6 +927,19 @@ enum Val<'e, 'p> {
     Empty(()),
     Func(Closure<'e, 'p>),
     Builtin(Builtin),
+}
+
+impl Val<'_, '_> {
+    fn ty(&self) -> &Ty {
+        match self {
+            Val::Int(_) => &Ty::Int,
+            Val::Str(_) => &Ty::Str,
+            Val::Bool(_) => &Ty::Bool,
+            Val::Empty(_) => &Ty::Empty,
+            Val::Func(closure) => &closure.func.ty,
+            Val::Builtin(builtin) => &builtin.ty,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -839,7 +998,7 @@ impl<'p> Program<'p> {
         let mut vals = func
             .args
             .iter()
-            .copied()
+            .map(|arg| arg.ident)
             .zip(args.into_iter())
             .collect::<HashMap<_, _>>();
         assert!(
@@ -880,7 +1039,7 @@ impl<'p> Program<'p> {
             match stmt {
                 Stmt::Let { name, expr } => {
                     let val = self.eval_expr(expr, envs);
-                    envs.last_mut().unwrap().vals.insert(*name, val);
+                    envs.last_mut().unwrap().vals.insert(name.ident, val);
                 }
                 Stmt::Set { name, expr } => {
                     let val = self.eval_expr(expr, envs);
@@ -1034,7 +1193,7 @@ impl<'p> Program<'p> {
                     if i != 0 {
                         write!(f, ", ").unwrap();
                     }
-                    write!(f, "{}", arg).unwrap();
+                    write!(f, "{}", arg.ident).unwrap();
                 }
                 writeln!(f, ")").unwrap();
 

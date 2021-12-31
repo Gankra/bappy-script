@@ -32,8 +32,6 @@ const MAIN_PROGRAM: &str = r#"
     }
 
     ret condition(printTrue, printFalse)
-}
-
 "#;
 
 fn main() {
@@ -153,18 +151,6 @@ struct Function<'p> {
     captures: HashSet<&'p str>,
 }
 
-#[derive(Clone)]
-struct Builtin {
-    args: &'static [&'static str],
-    func: for<'p> fn(args: &[Val<'p>]) -> Val<'p>,
-}
-
-impl fmt::Debug for Builtin {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<builtin>")
-    }
-}
-
 #[derive(Debug, Clone)]
 enum Stmt<'p> {
     Let { name: &'p str, expr: Expr<'p> },
@@ -193,6 +179,18 @@ enum Item<'p> {
     End,
 }
 
+#[derive(Clone)]
+struct Builtin {
+    args: &'static [&'static str],
+    func: for<'p> fn(args: &[Val<'p>]) -> Val<'p>,
+}
+
+impl fmt::Debug for Builtin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<builtin>")
+    }
+}
+
 fn parse(i: &str) -> IResult<&str, Program> {
     let (i, main) = parse_func_body(i, "main", Vec::new())?;
     Ok((
@@ -212,6 +210,19 @@ fn parse_func_body<'p>(
     let mut stmts = Vec::new();
 
     loop {
+        if i.is_empty() {
+            return Ok((
+                i,
+                Function {
+                    name,
+                    args,
+                    stmts,
+                    // Captures are populated by the type checker
+                    captures: HashSet::new(),
+                },
+            ));
+        }
+
         let (new_i, line) = take_until("\n")(i)?;
         println!("{}", line);
         i = &new_i[1..];
@@ -618,7 +629,6 @@ mod test {
     fn test_builtin_math() {
         let program = r#"
             ret sub(mul(add(4, 7), 13), 9)
-        }
         "#;
 
         let result = run(program);
@@ -637,7 +647,6 @@ mod test {
             }
 
             ret higher(doit)
-        }
         "#;
 
         let result = run(program);
@@ -656,7 +665,6 @@ mod test {
             }
 
             ret higher(doit)
-        }
         "#;
 
         let result = run(program);
@@ -678,7 +686,6 @@ mod test {
             }
 
             ret higher(doit)
-        }
         "#;
 
         let result = run(program);
@@ -697,7 +704,6 @@ mod test {
             }
 
             ret mask(33)
-        }
         "#;
 
         let result = run(program);
@@ -751,7 +757,6 @@ mod test {
             let result = x(7, x(val3 , y(x(2, val2, 7)), 8 ), 1)
 
             ret result
-        }
         "#;
 
         let result = run(program);

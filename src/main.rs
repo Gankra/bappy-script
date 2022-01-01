@@ -4,7 +4,7 @@ use std::fmt::{self, Write};
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
-    character::complete::{alpha1, alphanumeric1, char, space0, space1},
+    character::complete::{alpha1, alphanumeric1, char, digit1, space0, space1},
     combinator::{map, recognize, rest},
     error::ParseError,
     multi::{many0, separated_list0, separated_list1},
@@ -41,38 +41,34 @@ const MAIN_PROGRAM: &str = r#"
         z: Int,
     }
 
-    fn handle_point(point: Point) -> Point {
-        print "innocent"
+    fn handle_point(point: Point) -> Int {
         print point
-        ret point
+        ret point.x
     }
 
-    fn handle_pointer(ptr: fn(Point) -> Point, pt: Point) -> Int {
-        let pt2: Point = ptr(pt)
-        print pt2
-        ret 0
+    fn handle_pointer(ptr: fn(Point) -> Int, pt: Point) -> Int {
+        ret ptr(pt)
     }
 
-    let f: fn(Point) -> Point = handle_point
+    let pt: Point = Point { x: 3, y: 7, z: 12 }
+    print pt
+    print pt.x
+    print pt.y
+    print pt.z
 
-    let _: Int = handle_pointer(f, Point { x: 1, y: 3, z: 7 })
+    let tup: (Int, Bool, Str) = (19, true, "hello")
+    print tup
+    print tup.0
+    print tup.1
+    print tup.2
 
-    struct Point {
-        x: Int,
-        y: Int,
-    }
+    let pt2: Point = Point { x: tup.0, y: add(1, tup.0), z: mul(3, tup.0) }
+    print pt2
+    print pt2.x
+    print pt2.y
+    print pt2.z
 
-    fn handle_point_2(point: Point) -> Point {
-        print "evil"
-        print point
-        ret point
-    }
-
-    set f = handle_point_2
-
-    let _: Int = handle_pointer(f, Point { x: 2, y: 5 })
-
-    ret 0
+    ret handle_pointer(handle_point, pt)
 "#;
 
 fn main() {
@@ -301,6 +297,10 @@ enum Expr<'p> {
     },
     Lit(Literal<'p>),
     Var(&'p str),
+    Path {
+        ident: &'p str,
+        field: &'p str,
+    },
     Tuple(Vec<Expression<'p>>),
     Named {
         name: &'p str,
@@ -703,7 +703,9 @@ fn stmt_print(i: &str) -> IResult<&str, Stmt> {
 
 fn expr(i: &str) -> IResult<&str, Expression> {
     let start_of_expr = addr(i);
-    let (i, expr) = alt((expr_tuple, expr_named, expr_call, expr_lit, expr_var))(i)?;
+    let (i, expr) = alt((
+        expr_tuple, expr_named, expr_call, expr_path, expr_lit, expr_var,
+    ))(i)?;
     let end_of_expr = addr(i);
 
     Ok((
@@ -727,6 +729,16 @@ fn expr_call(i: &str) -> IResult<&str, Expr> {
     let (i, _) = tag(")")(i)?;
 
     Ok((i, Expr::Call { func, args }))
+}
+
+fn expr_path(i: &str) -> IResult<&str, Expr> {
+    let (i, name) = ident(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag(".")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, field) = alt((ident, digit1))(i)?;
+
+    Ok((i, Expr::Path { ident: name, field }))
 }
 
 fn expr_var(i: &str) -> IResult<&str, Expr> {
@@ -961,17 +973,17 @@ enum Ty<'p> {
         return_ty: TyIdx,
     },
     Tuple(Vec<TyIdx>),
-    Named(&'p str),
+    NamedStruct(StructTy<'p>),
     Unknown,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StructTy<'p> {
     name: &'p str,
     fields: Vec<FieldTy<'p>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FieldTy<'p> {
     ident: &'p str,
     ty: TyIdx,
@@ -1019,7 +1031,7 @@ struct CheckEnv<'p> {
     /// The types of variables
     vars: HashMap<&'p str, TyIdx>,
     /// The struct definitions and TyIdx's
-    tys: HashMap<&'p str, (TyIdx, StructTy<'p>)>,
+    tys: HashMap<&'p str, TyIdx>,
 
     /// Whether this scope is the root of a function
     /// (the scope of its arguments). If you walk over
@@ -1054,7 +1066,6 @@ impl<'p> TyCtx<'p> {
         program: &mut Program<'p>,
         struct_decl: StructDecl<'p>,
     ) -> TyIdx {
-        let ty_idx = self.tys.len();
         let fields = struct_decl
             .fields
             .iter()
@@ -1063,25 +1074,24 @@ impl<'p> TyCtx<'p> {
                 ty: self.memoize_ty(program, &f.ty),
             })
             .collect();
-        self.tys.push(Ty::Named(struct_decl.name));
-        self.envs.last_mut().unwrap().tys.insert(
-            struct_decl.name,
-            (
-                ty_idx,
-                StructTy {
-                    name: struct_decl.name,
-                    fields,
-                },
-            ),
-        );
+        let ty_idx = self.tys.len();
+        self.tys.push(Ty::NamedStruct(StructTy {
+            name: struct_decl.name,
+            fields,
+        }));
+        self.envs
+            .last_mut()
+            .unwrap()
+            .tys
+            .insert(struct_decl.name, ty_idx);
         ty_idx
     }
 
-    fn resolve_nominal_ty<'a>(&'a mut self, ty_name: &'p str) -> Option<&'a (TyIdx, StructTy<'p>)> {
+    fn resolve_nominal_ty<'a>(&'a mut self, ty_name: &'p str) -> Option<TyIdx> {
         if self.is_typed {
             for (_depth, env) in self.envs.iter_mut().rev().enumerate() {
                 if let Some(ty) = env.tys.get(ty_name) {
-                    return Some(ty);
+                    return Some(*ty);
                 }
             }
             None
@@ -1115,10 +1125,10 @@ impl<'p> TyCtx<'p> {
                 }
                 TyName::Named(name) => {
                     // Nominal types take a separate path because they're scoped
-                    if let Some((idx, _)) = self.resolve_nominal_ty(name) {
-                        *idx
+                    if let Some(ty_idx) = self.resolve_nominal_ty(name) {
+                        ty_idx
                     } else {
-                        // TODO: rejig this so the line info is better
+                        // FIXME: rejig this so the line info is better
                         program.error(
                             format!("Compile Error: use of undefined type name: {}", name),
                             Span {
@@ -1147,7 +1157,7 @@ impl<'p> TyCtx<'p> {
         }
     }
 
-    fn realize_ty(&self, ty: TyIdx) -> &Ty {
+    fn realize_ty(&self, ty: TyIdx) -> &Ty<'p> {
         if self.is_typed {
             self.tys
                 .get(ty)
@@ -1164,7 +1174,7 @@ impl<'p> TyCtx<'p> {
             Ty::Bool => format!("Bool"),
             Ty::Empty => format!("()"),
             Ty::Unknown => format!("<unknown>"),
-            Ty::Named(name) => format!("{}", name),
+            Ty::NamedStruct(struct_decl) => format!("{}", struct_decl.name),
             Ty::Tuple(arg_tys) => {
                 let mut f = String::new();
                 write!(f, "(").unwrap();
@@ -1372,6 +1382,59 @@ impl<'p> Program<'p> {
             Expr::Lit(lit) => {
                 return ctx.memoize_ty(self, &lit.ty());
             }
+            Expr::Path { ident, field } => {
+                if let Some(var) = ctx.resolve_var(ident) {
+                    if !var.is_local {
+                        captures.insert(ident);
+                    }
+                    let var_ty = *var.entry.get();
+
+                    match ctx.realize_ty(var_ty) {
+                        Ty::NamedStruct(struct_decl) => {
+                            for struct_field in &struct_decl.fields {
+                                if &struct_field.ident == field {
+                                    return struct_field.ty;
+                                }
+                            }
+                            self.error(
+                                format!(
+                                    "Compile Error: {} is not a field of {}",
+                                    ident, struct_decl.name
+                                ),
+                                expr.span,
+                            )
+                        }
+                        Ty::Tuple(arg_tys) => {
+                            if let Some(field_ty) =
+                                field.parse::<usize>().ok().and_then(|idx| arg_tys.get(idx))
+                            {
+                                *field_ty
+                            } else {
+                                self.error(
+                                    format!(
+                                        "Compile Error: {} is not a field of {}",
+                                        ident,
+                                        ctx.format_ty(var_ty)
+                                    ),
+                                    expr.span,
+                                )
+                            }
+                        }
+                        _ => self.error(
+                            format!(
+                                "Compile Error: there are no fields on type {}",
+                                ctx.format_ty(var_ty)
+                            ),
+                            expr.span,
+                        ),
+                    }
+                } else {
+                    self.error(
+                        format!("Compile Error: Use of undefined variable '{}'", ident),
+                        expr.span,
+                    )
+                }
+            }
             Expr::Var(var_name) => {
                 if let Some(var) = ctx.resolve_var(var_name) {
                     if !var.is_local {
@@ -1393,34 +1456,42 @@ impl<'p> Program<'p> {
                 ctx.memoize_inner(Ty::Tuple(arg_tys))
             }
             Expr::Named { name, args } => {
-                let query = ctx.resolve_nominal_ty(name).cloned();
-                if let Some((ty_idx, ty_decl)) = query {
-                    if args.len() != ty_decl.fields.len() {
-                        self.error(
-                            format!(
-                                "Compile Error: field count mismatch (expected {}, got {})",
-                                ty_decl.fields.len(),
-                                args.len()
-                            ),
-                            expr.span,
-                        )
-                    }
-                    for ((field, arg), field_decl) in args.iter().zip(ty_decl.fields.iter()) {
-                        if *field != field_decl.ident {
+                if let Some(ty_idx) = ctx.resolve_nominal_ty(name) {
+                    if let Ty::NamedStruct(ty_decl) = ctx.realize_ty(ty_idx) {
+                        let ty_decl = ty_decl.clone();
+                        if args.len() != ty_decl.fields.len() {
                             self.error(
                                 format!(
-                                    "Compile Error: field name mismatch (expected {}, got {})",
-                                    field_decl.ident, field
+                                    "Compile Error: field count mismatch (expected {}, got {})",
+                                    ty_decl.fields.len(),
+                                    args.len()
                                 ),
-                                arg.span,
+                                expr.span,
                             )
                         }
+                        for ((field, arg), field_decl) in args.iter().zip(ty_decl.fields.iter()) {
+                            if *field != field_decl.ident {
+                                self.error(
+                                    format!(
+                                        "Compile Error: field name mismatch (expected {}, got {})",
+                                        field_decl.ident, field
+                                    ),
+                                    arg.span,
+                                )
+                            }
 
-                        let expr_ty = self.check_expr(arg, ctx, captures);
-                        let expected_ty = field_decl.ty;
-                        self.check_ty(ctx, expr_ty, expected_ty, "struct literal", arg.span);
+                            let expr_ty = self.check_expr(arg, ctx, captures);
+                            let expected_ty = field_decl.ty;
+                            self.check_ty(ctx, expr_ty, expected_ty, "struct literal", arg.span);
+                        }
+                        ty_idx
+                    } else {
+                        let ty_str = ctx.format_ty(ty_idx);
+                        panic!(
+                            "Internal Compiler Error: nominal ty wasn't nominal?? {}: {}",
+                            name, ty_str
+                        );
                     }
-                    ty_idx
                 } else if self.typed {
                     self.error(
                         format!("Compile Error: Use of undefined struct '{}'", name),
@@ -1969,6 +2040,52 @@ impl<'p> Program<'p> {
                 Val::Struct(name, evaled_fields)
             }
             Expr::Var(var) => self.eval_resolve_var(var, envs),
+            Expr::Path { ident, field } => {
+                let val = self.eval_resolve_var(ident, envs);
+                match &val {
+                    Val::Tuple(args) => {
+                        if let Some(field_val) =
+                            field.parse::<usize>().ok().and_then(|idx| args.get(idx))
+                        {
+                            return field_val.clone();
+                        } else {
+                            let val = self.format_val(&val, true, 0);
+                            self.error(
+                                format!(
+                                    "Runtime Error: {} is not a valid index of {}: {}",
+                                    field, ident, val,
+                                ),
+                                expr.span,
+                            )
+                        }
+                    }
+                    Val::Struct(_name, fields) => {
+                        for (field_name, field_val) in fields {
+                            if field_name == field {
+                                return field_val.clone();
+                            }
+                        }
+                        let val = self.format_val(&val, true, 0);
+                        self.error(
+                            format!(
+                                "Runtime Error: {} is not a valid index of {}: {}",
+                                field, ident, val,
+                            ),
+                            expr.span,
+                        )
+                    }
+                    _ => {
+                        let val = self.format_val(&val, true, 0);
+                        self.error(
+                            format!(
+                                "Runtime Error: Tried to get a field on non-composite {}: {}",
+                                ident, val,
+                            ),
+                            expr.span,
+                        )
+                    }
+                }
+            }
             Expr::Lit(lit) => match lit {
                 Literal::Int(val) => Val::Int(*val),
                 Literal::Str(val) => Val::Str(*val),
@@ -3885,7 +4002,7 @@ mod test_typed {
 
             struct Point {
                 x: Int
-                y:Str
+                y: Str
             }
 
             let pt: Point = Point { x : 0, y : "hello" }
@@ -4012,6 +4129,64 @@ Point { x: 2, y: 5, z: 9 }
 Point { x: 1, y: 3, z: 7 }
 Point { x: 1, y: 3, z: 7 }
 Point { x: 3, y: 9 }
+"#
+        )
+    }
+
+    #[test]
+    fn test_field_basic() {
+        let program = r#"
+            struct Point {
+                x: Int,
+                y: Int,
+                z: Int,
+            }
+
+            let pt: Point = Point { x: 3, y: 7, z: 12 }
+            print pt
+            print pt.x
+            print pt.y
+            print pt.z
+
+            let tup: (Int, Bool, Str) = (19, true, "hello")
+            print tup
+            print tup.0
+            print tup.1
+            print tup.2
+
+            fn handle_point(point: Point) -> Int {
+                ret add(add(point.x, pt.y), tup.0)
+            }
+
+            let pt: Point = Point { x: tup.0, y: add(1, tup.0), z: mul(3, tup.0) }
+            print pt
+            print pt.x
+            print pt.y
+            print pt.z
+
+            fn handle_pointer(ptr: fn(Point) -> Int, pt: Point) -> Int {
+                ret ptr(pt)
+            }
+
+            ret handle_pointer(handle_point, pt)
+        "#;
+
+        let (result, output) = run_typed(program);
+        assert_eq!(result, 19 + 7 + 19);
+        assert_eq!(
+            output.unwrap(),
+            r#"Point { x: 3, y: 7, z: 12 }
+3
+7
+12
+(19, true, "hello")
+19
+true
+hello
+Point { x: 19, y: 20, z: 57 }
+19
+20
+57
 "#
         )
     }

@@ -215,7 +215,6 @@ struct Function<'p> {
 #[derive(Debug, Clone)]
 struct Statement<'p> {
     code: Stmt<'p>,
-    #[allow(dead_code)]
     span: Span,
 }
 
@@ -855,7 +854,11 @@ impl<'p> Program<'p> {
         envs.push(CheckEnv {
             vars: HashMap::new(),
         });
-        for Statement { code: stmt, .. } in stmts {
+        for Statement {
+            code: stmt,
+            span: stmt_span,
+        } in stmts
+        {
             match stmt {
                 Stmt::If {
                     expr,
@@ -927,8 +930,8 @@ impl<'p> Program<'p> {
                                 break;
                             } else {
                                 self.error(
-                                    format!("Compile Error: Trying to `set` captured variable {} (captures are by-value!)", name),
-                                    expr.span,
+                                    format!("Compile Error: Trying to `set` captured variable '{}' (captures are by-value!)", name),
+                                    *stmt_span,
                                 )
                             }
                         }
@@ -936,8 +939,11 @@ impl<'p> Program<'p> {
 
                     if !found {
                         self.error(
-                            format!("Compile Error: Trying to `set` undefined variable {}", name),
-                            expr.span,
+                            format!(
+                                "Compile Error: Trying to `set` undefined variable '{}'",
+                                name
+                            ),
+                            *stmt_span,
                         )
                     }
                 }
@@ -992,7 +998,7 @@ impl<'p> Program<'p> {
                     }
                 }
                 self.error(
-                    format!("Compile Error: Use of undefined variable {}", var_name),
+                    format!("Compile Error: Use of undefined variable '{}'", var_name),
                     expr.span,
                 )
             }
@@ -1048,7 +1054,7 @@ impl<'p> Program<'p> {
                     }
                 }
                 self.error(
-                    format!("Compile Error: Call of undefined function {}", func),
+                    format!("Compile Error: Call of undefined function '{}'", func),
                     expr.span,
                 )
             }
@@ -2550,6 +2556,36 @@ mod test_typed {
 
         let (result, _output) = run_typed(program);
         assert_eq!(result, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_scoping_3() {
+        let program = r#"
+            if true {
+                let factor: Int = 3
+            }
+            set factor = 4
+            ret factor
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_set_capture() {
+        let program = r#"
+            let captured: Int = 3
+            fn captures_state() {
+                set captured = 4
+            }
+            ret captured
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 4);
     }
 
     #[test]

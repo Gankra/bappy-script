@@ -40,6 +40,8 @@ const MAIN_PROGRAM: &str = r#"
     set factors = (2, false)
     print factors
 
+
+
     struct Point {
         x: Int
         y: Int
@@ -923,7 +925,7 @@ enum Ty<'p> {
 type TyIdx = usize;
 struct CheckEnv<'p> {
     vars: HashMap<&'p str, TyIdx>,
-    tys: HashMap<&'p str, TyIdx>,
+    tys: HashMap<&'p str, (TyIdx, Struct<'p>)>,
 }
 struct CheckEntry<'a, 'p> {
     is_local: bool,
@@ -1034,7 +1036,7 @@ impl<'p> Program<'p> {
                     envs.last_mut()
                         .unwrap()
                         .tys
-                        .insert(struct_decl.name, ty_idx);
+                        .insert(struct_decl.name, (ty_idx, struct_decl.clone()));
                 }
                 Stmt::Func { func } => {
                     // We push a func's name after checking it to avoid
@@ -1131,12 +1133,46 @@ impl<'p> Program<'p> {
                 self.memoize_ty(&Ty::Tuple(arg_tys))
             }
             Expr::Named { name, args } => {
-                for (field, arg) in args {
-                    self.check_expr(arg, envs, captures, func_subscope_depth);
-                    // TODO: check that the type with this name has this field
+                let query = self.resolve_ty(name, envs, func_subscope_depth).cloned();
+                if let Some((ty_idx, ty_decl)) = query {
+                    if args.len() != ty_decl.fields.len() {
+                        self.error(
+                            format!(
+                                "Compile Error: field count mismatch (expected {}, got {})",
+                                ty_decl.fields.len(),
+                                args.len()
+                            ),
+                            expr.span,
+                        )
+                    }
+                    for ((field, arg), field_decl) in args.iter().zip(ty_decl.fields.iter()) {
+                        if *field != field_decl.ident {
+                            self.error(
+                                format!(
+                                    "Compile Error: field name mismatch (expected {}, got {})",
+                                    field_decl.ident, field
+                                ),
+                                arg.span,
+                            )
+                        }
+
+                        let expr_ty = self.check_expr(arg, envs, captures, func_subscope_depth);
+                        let expected_ty = self.memoize_ty(&field_decl.ty);
+                        self.check_ty(expr_ty, expected_ty, "struct literal", arg.span);
+                    }
+                    ty_idx
+                } else if self.typed {
+                    self.error(
+                        format!("Compile Error: Use of undefined struct '{}'", name),
+                        expr.span,
+                    )
+                } else {
+                    // In untyped mode it's ok for a struct to be used without being declared!
+                    for (_field, arg) in args {
+                        self.check_expr(arg, envs, captures, func_subscope_depth);
+                    }
+                    return self.memoize_ty(&Ty::Named(name));
                 }
-                // TODO: check that all fields initialized
-                self.memoize_ty(&Ty::Named(name))
             }
             Expr::Call { func, args } => {
                 if let Some(var) = self.resolve_var(func, envs, func_subscope_depth) {
@@ -1209,15 +1245,15 @@ impl<'p> Program<'p> {
         None
     }
 
-    fn resolve_ty(
+    fn resolve_ty<'a>(
         &mut self,
         ty_name: &'p str,
-        envs: &mut Vec<CheckEnv<'p>>,
+        envs: &'a mut Vec<CheckEnv<'p>>,
         _func_subscope_depth: &mut usize,
-    ) -> Option<TyIdx> {
+    ) -> Option<&'a (TyIdx, Struct<'p>)> {
         for (_depth, env) in envs.iter_mut().rev().enumerate() {
-            if let Some(idx) = env.tys.get(ty_name) {
-                return Some(*idx);
+            if let Some(ty) = env.tys.get(ty_name) {
+                return Some(ty);
             }
         }
         None
@@ -1592,7 +1628,7 @@ impl<'p> Program<'p> {
                         )
                     }
                 }
-                Stmt::Struct(struct_decl) => {
+                Stmt::Struct(_struct_decl) => {
                     // TODO: ?
                 }
                 Stmt::Func { func } => {
@@ -1767,7 +1803,8 @@ impl<'p> Program<'p> {
                     if idx != 0 {
                         write!(f, ", ").unwrap();
                     }
-                    let val = self.format_val(val, debug, indent);
+                    // Debug print fields unconditionally to make 0 vs "0" clear
+                    let val = self.format_val(val, true, indent);
                     write!(f, "{}", val).unwrap();
                 }
                 write!(f, ")").unwrap();
@@ -2729,6 +2766,69 @@ loop!
 "#
         );
     }
+
+    #[test]
+    fn test_aggregates_basic() {
+        let program = r#"
+            let factors: (Int, Bool) = (0, true)
+            print factors
+            set factors = (2, false)
+            print factors
+
+            struct Point {
+                x: Int
+                y: Int
+            }
+
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, y: 4 }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, output) = run(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"(0, true)
+(2, false)
+Point { x: 0, y: 1 }
+Point { x: 3, y: 4 }
+"#
+        )
+    }
+
+    #[test]
+    fn test_aggregates_anon_structs() {
+        // In untyped mode, we can use structs without declaring them,
+        // and change the type of aggregates as we please.
+        let program = r#"
+            let factors = (0, true)
+            print factors
+            set factors = (2, "bye", ())
+            print factors
+
+            let pt = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, y: true, z: "hello" }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, output) = run(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"(0, true)
+(2, "bye", ())
+Point { x: 0, y: 1 }
+Point { x: 3, y: true, z: "hello" }
+"#
+        )
+    }
 }
 
 //
@@ -2759,6 +2859,280 @@ loop!
 mod test_typed {
     fn run_typed(input: &str) -> (i64, Option<String>) {
         crate::Program::typed(input).run()
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_undefined_struct_1() {
+        let program = r#"
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, y: 4 }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_undefined_struct_2() {
+        let program = r#"
+            if true {
+                struct Point {
+                    x: Int
+                    y: Int
+                } 
+            }
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, y: 4 }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_undefined_struct_3() {
+        let program = r#"
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, y: 4 }
+            print pt
+
+            struct Point {
+                x: Int
+                y: Int                
+            }
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_undefined_struct_4() {
+        let program = r#"
+            fn get_point() -> Point {
+                struct Point {
+                    x: Int
+                    y: Int                
+                }
+                ret Point { x: 0, y: 0 }
+            }
+            print get_point()
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_struct_field_name() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Int
+            } 
+
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, z: 4 }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_struct_field_order() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Int
+            } 
+
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { y: 4, x: 3 }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_struct_field_type() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Int
+            } 
+
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, y: true }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_struct_field_count_1() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Int
+            } 
+
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3 }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_struct_field_count_2() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Int
+            } 
+
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, y: 2, z: 3 }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_struct_dupe_field_1() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Int
+            } 
+
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, x: 2, y: 3 }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_struct_dupe_field_2() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Int
+            } 
+
+            let pt: Point = Point { x: 0, y: 1 }
+            print pt
+            set pt = Point { x: 3, x: 2 }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_tuple_length_1() {
+        let program = r#"
+            let factors: (Int, Bool) = (0, true)
+            print factors
+            set factors = (2, false, 3)
+            print factors
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_tuple_length_2() {
+        let program = r#"
+            let factors: (Int, Bool, Int) = (0, true)
+            print factors
+            set factors = (2, false)
+            print factors
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_tuple_ty() {
+        let program = r#"
+            let factors: (Int, Bool) = (0, true)
+            print factors
+            set factors = (2, 2)
+            print factors
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
     }
 
     #[test]
@@ -3112,6 +3486,104 @@ mod test_typed {
             output.unwrap(),
             r#"21
 99
+"#
+        )
+    }
+
+    #[test]
+    fn test_aggregates_basic() {
+        let program = r#"
+            let factors: (Int, Bool) = (0, true)
+            print factors
+            set factors = (2, false)
+            print factors
+
+            struct Point {
+                x: Int
+                y: Str
+            }
+
+            let pt: Point = Point { x: 0, y: "hello" }
+            print pt
+            set pt = Point { x: 3, y: "bye" }
+            print pt
+
+            ret 0
+        "#;
+
+        let (result, output) = run_typed(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"(0, true)
+(2, false)
+Point { x: 0, y: "hello" }
+Point { x: 3, y: "bye" }
+"#
+        )
+    }
+
+    #[test]
+    fn test_aggregates_captures() {
+        let program = r#"
+            fn print_1d_point() -> Int {
+                struct Point {
+                    x: Int
+                }
+                let x: Point = Point { x: 1 }
+                print x
+                ret 0
+            }
+
+            let _:Int = print_1d_point()
+            let print_point: fn() -> Int = print_1d_point
+            let _:Int = print_point()
+
+            if true {
+                struct Point {
+                    x: Int
+                    y: Int
+                }
+
+                fn print_2d_point() -> Int {
+                    let x: Point = Point { x: 2, y: 4 }
+                    print x
+                    ret 0
+                }
+
+                let _:Int = print_2d_point();
+                set print_point = print_2d_point
+            }
+
+            struct Point {
+                x: Int
+                y: Int
+                z: Int
+            }
+
+            fn print_3d_point() -> Int {
+                let x: Point = Point { x: 3, y: 5, z: 7 }
+                print x
+                ret 0
+            }
+
+            let _:Int = print_1d_point()
+            let _:Int = print_point()
+            let _:Int = print_3d_point()
+
+            ret 0
+        "#;
+
+        let (result, output) = run_typed(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"Point { x: 1 }
+Point { x: 1 }
+Point { x: 2, y: 4 }
+Point { x: 1 }
+Point { x: 2, y: 4 }
+Point { x: 3, y: 5, z: 7 }
 "#
         )
     }

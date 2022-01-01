@@ -35,49 +35,67 @@ use nom::{
 //
 
 const MAIN_PROGRAM: &str = r#"
-    struct Point {
-        x: Int,
-        y: Int,
-        z: Int,
-    }
-
-    let pt = Point { x: 3, y: 7, z: 12 }
-    print pt
-    print pt.x
-    print pt.y
-    print pt.z
-
-    let tup = (19, true, "hello")
-    print tup
-    print tup.0
-    print tup.1
-    print tup.2
-
-    let pt2 = Point { x: tup.0, y: add(1, tup.0), z: mul(3, tup.0) }
-    print pt2
-    print pt2.x
-    print pt2.y
-    print pt2.z
-
-    set pt = pt2
-
-    fn foo(x: Int) {
+    fn print_1d_point() {
+        struct Point {
+            x: Int
+        }
+        let x = Point { x: 1 }
+        print x
         ret ()
     }
 
-    let x = foo
-    print foo(0)
-    print x(2)
+    let _ = print_1d_point()
+    let print_point: fn() -> () = print_1d_point
+    let _ = print_point()
 
-    let a = true
-    let b = false
-    let c = ()
-    let d = ""
-    let e = "hello"
-    let f = 2
-    let g = -2
+    let tuple = (1, "hello", true)
+    if tuple.2 {
+        struct Point {
+            x: Int
+            y: Int
+        }
 
-    ret 0
+        let captured_point = Point { x: 2, y: 4 }
+        fn print_2d_point() {
+            print captured_point
+            ret ()
+        }
+
+        let _ = print_2d_point();
+        set print_point = print_2d_point
+    }
+
+    struct Point {
+        x: Int
+        y: Int
+        z: Int
+    }
+
+    fn print_3d_point() -> Int {
+        let pt: Point = Point { x: 3, y: 5, z: 7 }
+        print pt
+        ret add(add(pt.x, pt.y), pt.z)
+    }
+
+    fn print_many() {
+        print "3 more times!!!"
+        let counter = 3
+        loop {
+            if eq(counter, 0) {
+                break
+            }
+            set counter = sub(counter, 1)
+            let _ = print_3d_point()
+        }
+        ret ()
+    }
+
+    let _ = print_1d_point()
+    let _ = print_point()
+    let res = print_3d_point()
+    print res
+    let _ = print_many()
+    ret res
 "#;
 
 fn main() {
@@ -1147,7 +1165,12 @@ impl<'p> TyCtx<'p> {
                         .iter()
                         .map(|arg_ty_name| self.memoize_ty(program, arg_ty_name))
                         .collect();
-                    let return_ty = self.memoize_ty(program, return_ty);
+                    let mut return_ty = self.memoize_ty(program, return_ty);
+
+                    // Allow the return type to be elided
+                    if return_ty == self.ty_unknown {
+                        return_ty = self.ty_empty;
+                    }
                     self.memoize_inner(Ty::Func { arg_tys, return_ty })
                 }
                 TyName::Tuple(arg_ty_names) => {
@@ -4442,6 +4465,91 @@ Point { x: 19, y: 20, z: 57 }
 57
 ()
 ()
+"#
+        )
+    }
+
+    #[test]
+    fn test_a_bit_of_everything() {
+        let program = r#"
+            fn print_1d_point() {
+                struct Point {
+                    x: Int
+                }
+                let x = Point { x: 1 }
+                print x
+                ret ()
+            }
+
+            let _ = print_1d_point()
+            let print_point: fn() -> () = print_1d_point
+            let _ = print_point()
+
+            let tuple = (1, "hello", true)
+            if tuple.2 {
+                struct Point {
+                    x: Int
+                    y: Int
+                }
+
+                let captured_point = Point { x: 2, y: 4 }
+                fn print_2d_point() {
+                    print captured_point
+                    ret ()
+                }
+
+                let _ = print_2d_point();
+                set print_point = print_2d_point
+            }
+
+            struct Point {
+                x: Int
+                y: Int
+                z: Int
+            }
+
+            fn print_3d_point() -> Int {
+                let pt: Point = Point { x: 3, y: 5, z: 7 }
+                print pt
+                ret add(add(pt.x, pt.y), pt.z)
+            }
+
+            fn print_many() {
+                print "3 more times!!!"
+                let counter = 3
+                loop {
+                    if eq(counter, 0) {
+                        break
+                    }
+                    set counter = sub(counter, 1)
+                    let _ = print_3d_point()
+                }
+                ret ()
+            }
+
+            let _ = print_1d_point()
+            let _ = print_point()
+            let res = print_3d_point()
+            print res
+            let _ = print_many()
+            ret res
+        "#;
+
+        let (result, output) = run_typed(program);
+        assert_eq!(result, 15);
+        assert_eq!(
+            output.unwrap(),
+            r#"Point { x: 1 }
+Point { x: 1 }
+Point { x: 2, y: 4 }
+Point { x: 1 }
+Point { x: 2, y: 4 }
+Point { x: 3, y: 5, z: 7 }
+15
+3 more times!!!
+Point { x: 3, y: 5, z: 7 }
+Point { x: 3, y: 5, z: 7 }
+Point { x: 3, y: 5, z: 7 }
 "#
         )
     }

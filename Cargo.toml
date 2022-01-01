@@ -1,7 +1,9 @@
 [package]
-name = "compiler"
+name = "bappy-script"
 version = "0.1.0"
 edition = "2021"
+readme = "README.md"
+description = "Gankra's toy compiler"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

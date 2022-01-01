@@ -43,57 +43,126 @@ const MAIN_PROGRAM: &str = r#"
         ret mul(x, factory())
     }
 
-    let x: Int = 7
+    let x: Int = 0
 
     ret multi(get_factor, x)
 "#;
 
 fn main() {
-    run_typed(MAIN_PROGRAM);
+    Program::typed(MAIN_PROGRAM).run();
 }
 
-#[allow(dead_code)]
-fn run(input: &str) -> (i64, Option<String>) {
-    println!("parsing...");
-    let (_, mut bin) = parse(input).expect("Parse Error");
-    println!("parsed!\n");
+#[derive(Debug, Clone)]
+struct Program<'p> {
+    /// Should we use static types?
+    typed: bool,
 
-    bin.builtins = builtins();
-    bin.output = Some(String::new());
-    bin.typed = false;
+    /// The input we're parsing/checking/executing    
+    input: &'p str,
+    /// Lines of the input that have been parsed
+    input_lines: Vec<(usize, &'p str)>,
+    /// Fully parsed `main`
+    main: Option<Function<'p>>,
 
-    println!("checking...");
-    let mut bin = bin.check();
-    println!("checked!\n");
+    /// Builtin functions ("the stdlib")
+    builtins: Vec<Builtin>,
 
-    println!("evaling...");
-    let out = bin.eval();
-    println!("evaled!");
-    println!("{}", out);
-
-    (out, bin.output)
+    /// Printed values resulting from `eval`
+    output: Option<String>,
 }
 
-#[allow(dead_code)]
-fn run_typed(input: &str) -> (i64, Option<String>) {
-    println!("parsing...");
-    let (_, mut bin) = parse(input).expect("Parse Error");
-    println!("parsed!\n");
+impl<'p> Program<'p> {
+    #[allow(dead_code)]
+    pub fn untyped(input: &'p str) -> Self {
+        let mut out = Self::new(input);
+        out.typed = false;
+        out
+    }
 
-    bin.builtins = builtins();
-    bin.output = Some(String::new());
-    bin.typed = true;
+    #[allow(dead_code)]
+    pub fn typed(input: &'p str) -> Self {
+        let mut out = Self::new(input);
+        out.typed = true;
+        out
+    }
 
-    println!("checking...");
-    let mut bin = bin.check();
-    println!("checked!\n");
+    fn new(input: &'p str) -> Self {
+        Self {
+            typed: false,
+            input,
+            input_lines: Vec::new(),
+            main: None,
+            builtins: builtins(),
+            output: Some(String::new()),
+        }
+    }
 
-    println!("evaling...");
-    let out = bin.eval();
-    println!("evaled!");
-    println!("{}", out);
+    pub fn run(mut self) -> (i64, Option<String>) {
+        println!("parsing...");
+        if let Err(e) = self.parse() {
+            self.error(
+                format!("Parse Error: Unknown Error {:?}", e),
+                Span {
+                    start: addr(self.input),
+                    end: addr(self.input),
+                },
+            )
+        }
+        println!("parsed!\n");
 
-    (out, bin.output)
+        println!("checking...");
+        self.check();
+        println!("checked!\n");
+
+        println!("evaling...");
+        let out = self.eval();
+        println!("evaled! {}", out);
+
+        (out, self.output)
+    }
+
+    pub fn error(&self, message: String, span: Span) -> ! {
+        if !self.input_lines.is_empty() {
+            let line_number = self.line_number(span);
+            let (line_addr, line) = self.input_lines[line_number];
+            let start_col = span.start - line_addr;
+            let end_col = if span.end <= line_addr + line.len() {
+                span.end - line_addr
+            } else {
+                start_col + 1
+            };
+
+            eprintln!("");
+            eprintln!("{} @ program.bappy:{}:{}", message, line_number, start_col);
+            eprintln!("");
+            eprintln!("{}", line,);
+            for _ in 0..start_col {
+                eprint!(" ");
+            }
+            for _ in start_col..end_col {
+                eprint!("~");
+            }
+            eprintln!();
+        } else {
+            eprintln!("");
+            eprintln!("{}", message);
+            eprintln!("");
+        }
+
+        panic!("{}", message);
+    }
+
+    pub fn line_number(&self, span: Span) -> usize {
+        let mut output = 0;
+        for (line_number, (addr, _)) in self.input_lines.iter().enumerate() {
+            if span.start >= *addr {
+                output = line_number
+            } else {
+                break;
+            }
+        }
+        output
+    }
 }
 
 //
@@ -118,57 +187,75 @@ fn run_typed(input: &str) -> (i64, Option<String>) {
 //
 //
 
-#[derive(Debug, Clone)]
-struct Program<'p> {
-    main: Option<Function<'p>>,
-    typed: bool,
-    builtins: Vec<Builtin>,
-    output: Option<String>,
+/// A span of the input code.
+///
+/// Values are absolute addresses, which can be converted
+/// into an offset by subtracting the address of the input.
+#[derive(Debug, Copy, Clone)]
+struct Span {
+    pub start: usize,
+    pub end: usize,
 }
 
 #[derive(Debug, Clone)]
 struct Function<'p> {
     name: &'p str,
     args: Vec<VarDecl<'p>>,
-    stmts: Vec<Stmt<'p>>,
+    stmts: Vec<Statement<'p>>,
     ty: Ty,
     captures: HashSet<&'p str>,
 }
 
 #[derive(Debug, Clone)]
+struct Statement<'p> {
+    code: Stmt<'p>,
+    #[allow(dead_code)]
+    span: Span,
+}
+
+#[derive(Debug, Clone)]
 enum Stmt<'p> {
     If {
-        expr: Expr<'p>,
-        stmts: Vec<Stmt<'p>>,
-        else_stmts: Vec<Stmt<'p>>,
+        expr: Expression<'p>,
+        stmts: Vec<Statement<'p>>,
+        else_stmts: Vec<Statement<'p>>,
     },
     Loop {
-        stmts: Vec<Stmt<'p>>,
+        stmts: Vec<Statement<'p>>,
     },
     Let {
         name: VarDecl<'p>,
-        expr: Expr<'p>,
+        expr: Expression<'p>,
     },
     Set {
         name: &'p str,
-        expr: Expr<'p>,
+        expr: Expression<'p>,
     },
     Func {
         func: Function<'p>,
     },
     Ret {
-        expr: Expr<'p>,
+        expr: Expression<'p>,
     },
     Print {
-        expr: Expr<'p>,
+        expr: Expression<'p>,
     },
     Break,
     Continue,
 }
 
 #[derive(Debug, Clone)]
+struct Expression<'p> {
+    code: Expr<'p>,
+    span: Span,
+}
+
+#[derive(Debug, Clone)]
 enum Expr<'p> {
-    Call { func: &'p str, args: Vec<Expr<'p>> },
+    Call {
+        func: &'p str,
+        args: Vec<Expression<'p>>,
+    },
     Lit(Literal<'p>),
     Var(&'p str),
 }
@@ -203,13 +290,13 @@ enum Item<'p> {
     Comment(&'p str),
     Func(&'p str, Vec<VarDecl<'p>>, Ty),
     Stmt(Stmt<'p>),
-    If(Expr<'p>),
+    If(Expression<'p>),
     Loop,
     Else,
     End,
 }
 
-struct Block<'p>(Vec<Stmt<'p>>);
+struct Block<'p>(Vec<Statement<'p>>);
 
 #[derive(Clone)]
 struct Builtin {
@@ -225,120 +312,149 @@ impl fmt::Debug for Builtin {
     }
 }
 
-fn parse(i: &str) -> IResult<&str, Program> {
-    let (i, (Block(stmts), terminal)) = parse_block(i)?;
-    let main = Some(Function {
-        name: "main",
-        args: Vec::new(),
-        stmts,
-        ty: Ty::Func {
-            arg_tys: vec![],
-            return_ty: Box::new(Ty::Int),
-        },
-        captures: HashSet::new(),
-    });
+impl<'p> Program<'p> {
+    fn parse(&mut self) -> IResult<&'p str, ()> {
+        let (i, (Block(stmts), terminal)) = self.parse_block(self.input)?;
+        self.main = Some(Function {
+            name: "main",
+            args: Vec::new(),
+            stmts,
+            ty: Ty::Func {
+                arg_tys: vec![],
+                return_ty: Box::new(Ty::Int),
+            },
+            captures: HashSet::new(),
+        });
 
-    assert!(
-        matches!(terminal, Item::End),
-        "Parse Error: function ending eith an `else`"
-    );
-
-    Ok((
-        i,
-        Program {
-            main,
-            // other state populated by caller
-            typed: false,
-            builtins: Vec::new(),
-            output: None,
-        },
-    ))
-}
-
-fn parse_block<'p>(mut i: &'p str) -> IResult<&'p str, (Block<'p>, Item<'p>)> {
-    let mut stmts = Vec::new();
-
-    loop {
-        if i.trim().is_empty() {
-            return Ok((i, (Block(stmts), Item::End)));
+        if !matches!(terminal, Item::End) {
+            self.error(
+                format!("Parse Error: `fn` ending eith an `else`"),
+                Span {
+                    start: addr(i),
+                    end: addr(i),
+                },
+            )
         }
 
-        let (new_i, line) = take_until("\n")(i)?;
-        println!("{}", line);
-        i = &new_i[1..];
-        let line = line.trim();
+        Ok((i, ()))
+    }
 
-        if line.is_empty() {
-            continue;
-        }
+    fn parse_block(&mut self, mut i: &'p str) -> IResult<&'p str, (Block<'p>, Item<'p>)> {
+        let mut stmts = Vec::new();
 
-        match item(line)?.1 {
-            Item::Func(name, args, return_ty) => {
-                let (new_i, (Block(block_stmts), terminal)) = parse_block(i)?;
-                i = new_i;
-
-                assert!(
-                    matches!(terminal, Item::End),
-                    "Parse Error: function ending eith an `else`"
-                );
-
-                stmts.push(Stmt::Func {
-                    func: Function {
-                        ty: Ty::Func {
-                            arg_tys: args.iter().map(|decl| decl.ty.clone()).collect(),
-                            return_ty: Box::new(return_ty),
-                        },
-                        name,
-                        args,
-                        stmts: block_stmts,
-                        // Captures are populated by the type checker
-                        captures: HashSet::new(),
-                    },
-                });
+        loop {
+            if i.trim().is_empty() {
+                return Ok((i, (Block(stmts), Item::End)));
             }
-            Item::If(expr) => {
-                let (new_i, (Block(block_stmts), terminal)) = parse_block(i)?;
-                i = new_i;
 
-                let else_stmts = if let Item::Else = terminal {
-                    let (new_i, (Block(else_stmts), terminal)) = parse_block(i)?;
+            let (new_i, line) = take_until("\n")(i)?;
+            self.input_lines.push((addr(line), line));
+            println!("{}", line);
+            i = &new_i[1..];
+            let line = line.trim();
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let stmt_start = addr(line);
+            let (rest_of_line, item) = item(line)?;
+            let stmt_end = addr(rest_of_line);
+
+            let stmt = match item {
+                Item::Func(name, args, return_ty) => {
+                    let (new_i, (Block(block_stmts), terminal)) = self.parse_block(i)?;
                     i = new_i;
 
-                    assert!(
-                        matches!(terminal, Item::End),
-                        "Parse Error: `else` ending eith an `else`"
-                    );
-                    else_stmts
-                } else {
-                    Vec::new()
-                };
+                    if !matches!(terminal, Item::End) {
+                        self.error(
+                            format!("Parse Error: `fn` ending eith an `else`"),
+                            Span {
+                                start: addr(i),
+                                end: addr(i),
+                            },
+                        )
+                    }
 
-                stmts.push(Stmt::If {
-                    expr,
-                    stmts: block_stmts,
-                    else_stmts,
-                })
-            }
-            Item::Loop => {
-                let (new_i, (Block(block_stmts), terminal)) = parse_block(i)?;
-                i = new_i;
+                    Stmt::Func {
+                        func: Function {
+                            ty: Ty::Func {
+                                arg_tys: args.iter().map(|decl| decl.ty.clone()).collect(),
+                                return_ty: Box::new(return_ty),
+                            },
+                            name,
+                            args,
+                            stmts: block_stmts,
+                            // Captures are populated by the type checker
+                            captures: HashSet::new(),
+                        },
+                    }
+                }
+                Item::If(expr) => {
+                    let (new_i, (Block(block_stmts), terminal)) = self.parse_block(i)?;
+                    i = new_i;
 
-                assert!(
-                    matches!(terminal, Item::End),
-                    "Parse Error: loop ending eith an `else`"
-                );
+                    let else_stmts = if let Item::Else = terminal {
+                        let (new_i, (Block(else_stmts), terminal)) = self.parse_block(i)?;
+                        i = new_i;
 
-                stmts.push(Stmt::Loop { stmts: block_stmts });
-            }
-            Item::Stmt(stmt) => {
-                stmts.push(stmt);
-            }
-            Item::Comment(_comment) => {
-                // discard it
-            }
-            item @ Item::End | item @ Item::Else => return Ok((i, (Block(stmts), item))),
+                        if !matches!(terminal, Item::End) {
+                            self.error(
+                                format!("Parse Error: `else` ending eith an `else`"),
+                                Span {
+                                    start: addr(i),
+                                    end: addr(i),
+                                },
+                            )
+                        }
+                        else_stmts
+                    } else {
+                        Vec::new()
+                    };
+
+                    Stmt::If {
+                        expr,
+                        stmts: block_stmts,
+                        else_stmts,
+                    }
+                }
+                Item::Loop => {
+                    let (new_i, (Block(block_stmts), terminal)) = self.parse_block(i)?;
+                    i = new_i;
+
+                    if !matches!(terminal, Item::End) {
+                        self.error(
+                            format!("Parse Error: `loop` ending eith an `else`"),
+                            Span {
+                                start: addr(i),
+                                end: addr(i),
+                            },
+                        )
+                    }
+
+                    Stmt::Loop { stmts: block_stmts }
+                }
+                Item::Stmt(stmt) => stmt,
+                Item::Comment(_comment) => {
+                    // discard it
+                    continue;
+                }
+                item @ Item::End | item @ Item::Else => return Ok((i, (Block(stmts), item))),
+            };
+
+            stmts.push(Statement {
+                code: stmt,
+                span: Span {
+                    start: stmt_start,
+                    end: stmt_end,
+                },
+            });
         }
     }
+}
+
+fn addr(input: &str) -> usize {
+    input.as_ptr() as usize
 }
 
 fn item(i: &str) -> IResult<&str, Item> {
@@ -481,8 +597,21 @@ fn stmt_print(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::Print { expr }))
 }
 
-fn expr(i: &str) -> IResult<&str, Expr> {
-    alt((expr_call, expr_lit, expr_var))(i)
+fn expr(i: &str) -> IResult<&str, Expression> {
+    let start_of_expr = addr(i);
+    let (i, expr) = alt((expr_call, expr_lit, expr_var))(i)?;
+    let end_of_expr = addr(i);
+
+    Ok((
+        i,
+        Expression {
+            code: expr,
+            span: Span {
+                start: start_of_expr,
+                end: end_of_expr,
+            },
+        },
+    ))
 }
 
 fn expr_call(i: &str) -> IResult<&str, Expr> {
@@ -652,7 +781,7 @@ struct CheckEnv<'p> {
 }
 
 impl<'p> Program<'p> {
-    fn check(mut self) -> Self {
+    fn check(&mut self) {
         let builtins = self
             .builtins
             .iter()
@@ -662,7 +791,6 @@ impl<'p> Program<'p> {
         let mut main = self.main.take().unwrap();
         self.check_func(&mut main, &mut envs);
         self.main = Some(main);
-        self
     }
 
     fn check_func(&mut self, func: &mut Function<'p>, envs: &mut Vec<CheckEnv<'p>>) {
@@ -688,12 +816,12 @@ impl<'p> Program<'p> {
 
     fn check_block(
         &mut self,
-        stmts: &mut [Stmt<'p>],
+        stmts: &mut [Statement<'p>],
         envs: &mut Vec<CheckEnv<'p>>,
         captures: &mut HashSet<&'p str>,
         return_ty: &Ty,
     ) {
-        for stmt in stmts {
+        for Statement { code: stmt, .. } in stmts {
             match stmt {
                 Stmt::If {
                     expr,
@@ -701,13 +829,14 @@ impl<'p> Program<'p> {
                     else_stmts,
                 } => {
                     let expr_ty = self.check_expr(expr, envs, captures);
-
-                    if self.typed {
-                        assert!(
-                            &expr_ty == &Ty::Bool,
-                            "Compile Error: If type mismatch (expected {:?}, got {:?})",
-                            Ty::Bool,
-                            expr_ty
+                    let expected_ty = Ty::Bool;
+                    if self.typed && expr_ty != expected_ty {
+                        self.error(
+                            format!(
+                                "Compile Error: `if` type mismatch (expected {:?}, got {:?})",
+                                expected_ty, expr_ty
+                            ),
+                            expr.span,
                         );
                     }
 
@@ -729,15 +858,16 @@ impl<'p> Program<'p> {
                 }
                 Stmt::Let { name, expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures);
-                    let decl_ty = &name.ty;
+                    let expected_ty = &name.ty;
 
-                    if self.typed {
-                        assert!(
-                            &expr_ty == decl_ty,
-                            "Compile Error: Let type mismatch (expected {:?}, got {:?})",
-                            decl_ty,
-                            expr_ty
-                        );
+                    if self.typed && &expr_ty != expected_ty {
+                        self.error(
+                            format!(
+                                "Compile Error: `let` type mismatch (expected {:?}, got {:?})",
+                                expected_ty, expr_ty,
+                            ),
+                            expr.span,
+                        )
                     }
 
                     envs.last_mut().unwrap().vars.insert(name.ident, expr_ty);
@@ -745,33 +875,36 @@ impl<'p> Program<'p> {
                 Stmt::Set { name, expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures);
 
-                    if let Some(old_ty) = envs.last().unwrap().vars.get(name) {
-                        if self.typed {
-                            assert!(
-                                &expr_ty == old_ty,
-                                "Compile Error: Set type mismatch (expected {:?}, got {:?})",
-                                old_ty,
-                                expr_ty
-                            );
+                    if let Some(expected_ty) = envs.last().unwrap().vars.get(name) {
+                        if self.typed && &expr_ty != expected_ty {
+                            self.error(
+                                format!(
+                                    "Compile Error: `set` type mismatch (expected {:?}, got {:?})",
+                                    expected_ty, expr_ty
+                                ),
+                                expr.span,
+                            )
                         }
 
                         envs.last_mut().unwrap().vars.insert(name, expr_ty);
                     } else {
-                        panic!(
-                            "Compile Error: trying to set an undefined local variable {}",
-                            name
-                        );
+                        self.error(
+                            format!("Compile Error: Trying to `set` undefined variable {}", name),
+                            expr.span,
+                        )
                     }
                 }
                 Stmt::Ret { expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures);
+                    let expected_ty = return_ty;
 
-                    if self.typed {
-                        assert!(
-                            &expr_ty == return_ty,
-                            "Compile Error: Return type mismatch (expected {:?}, got {:?})",
-                            return_ty,
-                            expr_ty
+                    if self.typed && &expr_ty != expected_ty {
+                        self.error(
+                            format!(
+                                "Compile Error: Return type mismatch (expected {:?}, got {:?})",
+                                expected_ty, expr_ty
+                            ),
+                            expr.span,
                         );
                     }
                 }
@@ -788,11 +921,11 @@ impl<'p> Program<'p> {
 
     fn check_expr(
         &mut self,
-        expr: &Expr<'p>,
+        expr: &Expression<'p>,
         envs: &mut Vec<CheckEnv<'p>>,
         captures: &mut HashSet<&'p str>,
     ) -> Ty {
-        match expr {
+        match &expr.code {
             Expr::Lit(lit) => {
                 return lit.ty();
             }
@@ -807,7 +940,10 @@ impl<'p> Program<'p> {
                         return ty.clone();
                     }
                 }
-                panic!("Compile Error: Use of undefined variable {}", var_name);
+                self.error(
+                    format!("Compile Error: Use of undefined variable {}", var_name),
+                    expr.span,
+                )
             }
             Expr::Call { func, args } => {
                 for (depth, env) in envs.iter().rev().enumerate() {
@@ -816,7 +952,10 @@ impl<'p> Program<'p> {
                         {
                             (arg_tys.clone(), (**return_ty).clone())
                         } else if self.typed {
-                            panic!("Compile Error: Function call must have Func type!");
+                            self.error(
+                                format!("Compile Error: Function call must have Func type!"),
+                                expr.span,
+                            )
                         } else {
                             (Vec::new(), Ty::Unknown)
                         };
@@ -827,17 +966,39 @@ impl<'p> Program<'p> {
                             captures.insert(func);
                         }
 
-                        for (idx, expr) in args.iter().enumerate() {
-                            let expr_ty = self.check_expr(expr, envs, captures);
-                            if self.typed {
-                                let arg_ty = &arg_tys[idx];
-                                assert!(&expr_ty == arg_ty, "Compile Error: Argument type mismatch (expected {:?}, got {:?})", arg_ty, expr_ty);
+                        if self.typed && arg_tys.len() != args.len() {
+                            self.error(
+                                format!(
+                                    "Compile Error: arg count mismatch (expected {:?}, got {:?})",
+                                    arg_tys.len(),
+                                    args.len(),
+                                ),
+                                expr.span,
+                            )
+                        }
+
+                        for (idx, arg_expr) in args.iter().enumerate() {
+                            let expr_ty = self.check_expr(arg_expr, envs, captures);
+                            let expected_ty = arg_tys.get(idx).unwrap_or(&Ty::Unknown);
+
+                            if self.typed && &expr_ty != expected_ty {
+                                self.error(
+                                    format!(
+                                        "Compile Error: arg type mismatch (expected {:?}, got {:?})",
+                                        expected_ty,
+                                        expr_ty
+                                    ),
+                                    arg_expr.span,
+                                )
                             }
                         }
                         return return_ty;
                     }
                 }
-                panic!("Compile Error: Call of undefined function {}", func);
+                self.error(
+                    format!("Compile Error: Call of undefined function {}", func),
+                    expr.span,
+                )
             }
         }
     }
@@ -1060,7 +1221,7 @@ impl<'p> Program<'p> {
             self.main = Some(main);
             int
         } else {
-            panic!("main must evaluate to an int!");
+            panic!("Runtime Error: main must evaluate to an int!");
         }
     }
 
@@ -1116,10 +1277,10 @@ impl<'p> Program<'p> {
 
     fn eval_block<'e>(
         &mut self,
-        stmts: &'e [Stmt<'p>],
+        stmts: &'e [Statement<'p>],
         envs: &mut Vec<Env<'e, 'p>>,
     ) -> ControlFlow<'e, 'p> {
-        for stmt in stmts {
+        for Statement { code: stmt, .. } in stmts {
             match stmt {
                 Stmt::Let { name, expr } => {
                     let val = self.eval_expr(expr, envs);
@@ -1200,8 +1361,8 @@ impl<'p> Program<'p> {
         ControlFlow::None
     }
 
-    fn eval_expr<'e>(&mut self, expr: &Expr<'p>, envs: &mut Vec<Env<'e, 'p>>) -> Val<'e, 'p> {
-        match expr {
+    fn eval_expr<'e>(&mut self, expr: &Expression<'p>, envs: &mut Vec<Env<'e, 'p>>) -> Val<'e, 'p> {
+        match &expr.code {
             Expr::Call {
                 func: func_name,
                 args,
@@ -1337,7 +1498,9 @@ impl<'p> Program<'p> {
 
 #[cfg(test)]
 mod test {
-    use super::run;
+    fn run(input: &str) -> (i64, Option<String>) {
+        crate::Program::untyped(input).run()
+    }
 
     #[test]
     #[should_panic(expected = "Compile Error")]
@@ -2238,7 +2401,9 @@ loop!
 
 #[cfg(test)]
 mod test_typed {
-    use super::run_typed;
+    fn run_typed(input: &str) -> (i64, Option<String>) {
+        crate::Program::typed(input).run()
+    }
 
     #[test]
     #[should_panic(expected = "Compile Error")]

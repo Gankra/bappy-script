@@ -41,34 +41,43 @@ const MAIN_PROGRAM: &str = r#"
         z: Int,
     }
 
-    fn handle_point(point: Point) -> Int {
-        print point
-        ret point.x
-    }
-
-    fn handle_pointer(ptr: fn(Point) -> Int, pt: Point) -> Int {
-        ret ptr(pt)
-    }
-
-    let pt: Point = Point { x: 3, y: 7, z: 12 }
+    let pt = Point { x: 3, y: 7, z: 12 }
     print pt
     print pt.x
     print pt.y
     print pt.z
 
-    let tup: (Int, Bool, Str) = (19, true, "hello")
+    let tup = (19, true, "hello")
     print tup
     print tup.0
     print tup.1
     print tup.2
 
-    let pt2: Point = Point { x: tup.0, y: add(1, tup.0), z: mul(3, tup.0) }
+    let pt2 = Point { x: tup.0, y: add(1, tup.0), z: mul(3, tup.0) }
     print pt2
     print pt2.x
     print pt2.y
     print pt2.z
 
-    ret handle_pointer(handle_point, pt)
+    set pt = pt2
+
+    fn foo(x: Int) {
+        ret ()
+    }
+
+    let x = foo
+    print foo(0)
+    print x(2)
+
+    let a = true
+    let b = false
+    let c = ()
+    let d = ""
+    let e = "hello"
+    let f = 2
+    let g = -2
+
+    ret 0
 "#;
 
 fn main() {
@@ -331,6 +340,7 @@ impl Literal<'_> {
 struct VarDecl<'p> {
     ident: &'p str,
     ty: TyName<'p>,
+    span: Span,
 }
 #[derive(Debug, Clone)]
 struct FieldDecl<'p> {
@@ -802,13 +812,7 @@ fn lit_empty(i: &str) -> IResult<&str, Literal> {
 }
 
 fn var_decl(i: &str) -> IResult<&str, VarDecl> {
-    alt((
-        typed_ident,
-        map(ident, |id| VarDecl {
-            ident: id,
-            ty: TyName::Unknown,
-        }),
-    ))(i)
+    alt((typed_ident, untyped_ident))(i)
 }
 
 fn ident(i: &str) -> IResult<&str, &str> {
@@ -818,14 +822,39 @@ fn ident(i: &str) -> IResult<&str, &str> {
     ))(i)
 }
 
+fn untyped_ident(i: &str) -> IResult<&str, VarDecl> {
+    let start = addr(i);
+    let (i, id) = ident(i)?;
+    let end = addr(i);
+    let span = Span { start, end };
+    Ok((
+        i,
+        VarDecl {
+            ident: id,
+            ty: TyName::Unknown,
+            span,
+        },
+    ))
+}
+
 fn typed_ident(i: &str) -> IResult<&str, VarDecl> {
+    let start = addr(i);
     let (i, id) = ident(i)?;
     let (i, _) = space0(i)?;
     let (i, _) = tag(":")(i)?;
     let (i, _) = space0(i)?;
     let (i, ty) = ty_ref(i)?;
+    let end = addr(i);
+    let span = Span { start, end };
 
-    Ok((i, VarDecl { ident: id, ty }))
+    Ok((
+        i,
+        VarDecl {
+            ident: id,
+            ty,
+            span,
+        },
+    ))
 }
 
 fn ty_ref(i: &str) -> IResult<&str, TyName> {
@@ -1024,6 +1053,11 @@ struct TyCtx<'p> {
     /// If nothing is found, that type name / variable name is undefined
     /// at this point in the program.
     envs: Vec<CheckEnv<'p>>,
+
+    /// The absence of a type annotation, saved for easy comparison.
+    ty_unknown: TyIdx,
+    /// The empty tuple, saved for easy use.
+    ty_empty: TyIdx,
 }
 
 /// Information about types for a specific scope.
@@ -1215,8 +1249,15 @@ impl<'p> Program<'p> {
             ty_map: HashMap::new(),
             envs: Vec::new(),
             is_typed: self.typed,
+            ty_unknown: 0,
+            ty_empty: 0,
         };
 
+        // Cache some key types
+        ctx.ty_unknown = ctx.memoize_inner(Ty::Unknown);
+        ctx.ty_empty = ctx.memoize_inner(Ty::Empty);
+
+        // Set up globals (stdlib)
         let builtins = self
             .builtins
             .clone()
@@ -1251,7 +1292,17 @@ impl<'p> Program<'p> {
         let vars = func
             .args
             .iter()
-            .map(|decl| (decl.ident, ctx.memoize_ty(self, &decl.ty)))
+            .map(|decl| {
+                let ty = ctx.memoize_ty(self, &decl.ty);
+                if !self.typed || ty != ctx.ty_unknown {
+                    (decl.ident, ty)
+                } else {
+                    self.error(
+                        format!("Compile Error: function arguments must have types"),
+                        decl.span,
+                    )
+                }
+            })
             .collect();
 
         ctx.envs.push(CheckEnv {
@@ -1263,11 +1314,20 @@ impl<'p> Program<'p> {
         let mut captures = HashSet::new();
 
         let return_ty = if let TyName::Func { return_ty, .. } = &func.ty {
-            &*return_ty
+            return_ty
         } else {
-            &TyName::Unknown
+            panic!(
+                "Internal Compiler Error: function that wasn't a function? {}",
+                func.name
+            );
         };
-        let return_ty = ctx.memoize_ty(self, return_ty);
+
+        // If the `-> Type` is omitted from a function decl, assume
+        // the empty tuple `()`, just like Rust.
+        let mut return_ty = ctx.memoize_ty(self, return_ty);
+        if return_ty == ctx.ty_unknown {
+            return_ty = ctx.ty_empty;
+        }
 
         self.check_block(&mut func.stmts, ctx, &mut captures, return_ty);
 
@@ -1323,7 +1383,12 @@ impl<'p> Program<'p> {
                     let expr_ty = self.check_expr(expr, ctx, captures);
                     let expected_ty = ctx.memoize_ty(self, &name.ty);
 
-                    self.check_ty(ctx, expr_ty, expected_ty, "`let`", expr.span);
+                    // If a let statement has no type annotation, infer it
+                    // to have the type of the expr assigned to it. Ultimately
+                    // this just means not bothering to type check it.
+                    if expected_ty != ctx.ty_unknown {
+                        self.check_ty(ctx, expr_ty, expected_ty, "`let`", expr.span);
+                    }
 
                     ctx.envs
                         .last_mut()
@@ -1399,7 +1464,7 @@ impl<'p> Program<'p> {
                             self.error(
                                 format!(
                                     "Compile Error: {} is not a field of {}",
-                                    ident, struct_decl.name
+                                    field, struct_decl.name
                                 ),
                                 expr.span,
                             )
@@ -1413,7 +1478,7 @@ impl<'p> Program<'p> {
                                 self.error(
                                     format!(
                                         "Compile Error: {} is not a field of {}",
-                                        ident,
+                                        field,
                                         ctx.format_ty(var_ty)
                                     ),
                                     expr.span,
@@ -3201,6 +3266,126 @@ mod test_typed {
     }
 
     #[test]
+    #[should_panic(expected = "Parse Error")]
+    fn parse_fail_partial_annotation_1() {
+        let program = r#"
+            fn foo(x: Int, y: ) {
+                ret ()
+            }
+            ret 0
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Parse Error")]
+    fn parse_fail_partial_annotation_2() {
+        let program = r#"
+            let x: = 2
+            ret 0
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_field_1() {
+        let program = r#"
+            let x = true
+            ret x.0
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_field_2() {
+        let program = r#"
+            let x = (0, 1)
+            ret x.2
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_field_3() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Bool
+            }
+            let x = Point { x: 1, y: true }
+            ret x.z
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_bad_field_4() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Bool
+            }
+            let x = Point { x: 1, y: true }
+            ret x.0
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_inferred_types_enforced_1() {
+        let program = r#"
+            struct Point {
+                x: Int
+                y: Bool
+            }
+            let x = Point { x: 1, y: true }
+            set x = true
+            ret 0
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_inferred_types_enforced_2() {
+        let program = r#"
+            fn foo() {
+                ret 1
+            }
+            let _ = foo()
+            ret 0
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_args_must_have_types() {
+        let program = r#"
+            fn foo(x: Int, y) {
+                ret ()
+            }
+            let _ = foo
+            ret 0
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
     #[should_panic(expected = "Compile Error")]
     fn compile_fail_evil_nominal_smuggling_complex() {
         // If you don't handle nested nominal types deeply, then you can get
@@ -4187,6 +4372,76 @@ Point { x: 19, y: 20, z: 57 }
 19
 20
 57
+"#
+        )
+    }
+
+    #[test]
+    fn test_inference_basic() {
+        let program = r#"
+            struct Point {
+                x: Int,
+                y: Int,
+                z: Int,
+            }
+
+            let pt = Point { x: 3, y: 7, z: 12 }
+            print pt
+            print pt.x
+            print pt.y
+            print pt.z
+
+            let tup = (19, true, "hello")
+            print tup
+            print tup.0
+            print tup.1
+            print tup.2
+
+            let pt2 = Point { x: tup.0, y: add(1, tup.0), z: mul(3, tup.0) }
+            print pt2
+            print pt2.x
+            print pt2.y
+            print pt2.z
+
+            set pt = pt2
+
+            fn foo(x: Int) {
+                ret ()
+            }
+
+            let x = foo
+            print foo(0)
+            print x(2)
+
+            let a = true
+            let b = false
+            let c = ()
+            let d = ""
+            let e = "hello"
+            let f = 2
+            let g = -2
+
+            ret 0
+        "#;
+
+        let (result, output) = run_typed(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"Point { x: 3, y: 7, z: 12 }
+3
+7
+12
+(19, true, "hello")
+19
+true
+hello
+Point { x: 19, y: 20, z: 57 }
+19
+20
+57
+()
+()
 "#
         )
     }

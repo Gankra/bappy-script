@@ -35,22 +35,42 @@ use nom::{
 //
 
 const MAIN_PROGRAM: &str = r#"
-    let factors: (Int, Bool) = (0, true)
-    print factors
-    set factors = (2, false)
-    print factors
-
-
-
     struct Point {
-        x: Int
-        y: Int
+        x: Int,
+        y: Int,
+        z: Int,
     }
 
-    let pt: Point = Point { x: 0, y: 1 }
-    print pt
-    set pt = Point { x: 3, y: 4 }
-    print pt
+    fn handle_point(point: Point) -> Point {
+        print "innocent"
+        print point
+        ret point
+    }
+
+    fn handle_pointer(ptr: fn(Point) -> Point, pt: Point) -> Int {
+        let pt2: Point = ptr(pt)
+        print pt2
+        ret 0
+    }
+
+    let f: fn(Point) -> Point = handle_point
+
+    let _: Int = handle_pointer(f, Point { x: 1, y: 3, z: 7 })
+
+    struct Point {
+        x: Int,
+        y: Int,
+    }
+
+    fn handle_point_2(point: Point) -> Point {
+        print "evil"
+        print point
+        ret point
+    }
+
+    set f = handle_point_2
+
+    let _: Int = handle_pointer(f, Point { x: 2, y: 5 })
 
     ret 0
 "#;
@@ -2943,6 +2963,148 @@ mod test_typed {
 
     #[test]
     #[should_panic(expected = "Compile Error")]
+    fn compile_fail_evil_nominal_smuggling_complex() {
+        // If you don't handle nested nominal types deeply, then you can get
+        // situations where the type changes from underneath you!
+        let program = r#"
+            struct Point {
+                x: Int,
+                y: Int,
+                z: Int,
+            }
+
+            fn handle_point(point: Point) -> Point {
+                print "innocent"
+                print point
+                ret point
+            }
+
+            fn handle_pointer(ptr: fn(Point) -> Point, pt: Point) -> Int {
+                let pt2: Point = ptr(pt)
+                print pt2
+                ret 0
+            }
+
+            let f: fn(Point) -> Point = handle_point
+
+            let _: Int = handle_pointer(f, Point { x: 1, y: 3, z: 7 })
+
+            struct Point {
+                x: Int,
+                y: Int,
+            }
+
+            fn handle_point_2(point: Point) -> Point {
+                print "evil"
+                print point
+                ret point
+            }
+
+            set f = handle_point_2
+
+            let _: Int = handle_pointer(f, Point { x: 2, y: 5 })
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_evil_nominal_smuggling_simple_1() {
+        // If you don't handle shadowed nominal types, then you can get
+        // situations where the type changes from underneath you!
+        let program = r#"
+            struct Point {
+                x: Int,
+                y: Int,
+                z: Int,
+            }
+
+            let x: Point = Point { x: 1, y: 3, z: 7 }
+            print x
+
+            struct Point {
+                x: Int,
+                y: Int,
+            }
+            set x = Point { x: 2, y: 5 }
+            print x
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_evil_nominal_smuggling_simple_2() {
+        // If you don't handle nested nominal types deeply, then you can get
+        // situations where the type changes from underneath you!
+        let program = r#"
+            struct Point {
+                x: Int,
+                y: Int,
+                z: Int,
+            }
+
+            let x: (Point, Point) = (Point { x: 1, y: 3, z: 7 }, Point { x: 2, y: 5, z: 8})
+            print x
+
+            struct Point {
+                x: Int,
+                y: Int,
+            }
+            set x = (Point { x: 2, y: 5 }, Point { x: 3, y: 4 })
+            print x
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_evil_nominal_smuggling_simple_3() {
+        // If you don't handle nested nominal types deeply, then you can get
+        // situations where the type changes from underneath you!
+        let program = r#"
+
+            struct Point {
+                x: Int,
+                y: Int,
+                z: Int,
+            }
+            struct MyTuple {
+                a: Point,
+                b: Point,
+            }
+
+            let x: MyTuple = MyTuple { a: Point { x: 1, y: 3, z: 7 }, b: Point { x: 2, y: 5, z: 8}}
+            print x
+
+            struct Point {
+                x: Int,
+                y: Int,
+            }
+            set x = MyTuple { a: Point { x: 2, y: 5 }, b: Point { x: 3, y: 4 } }
+            print x
+
+            ret 0
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
     fn compile_fail_undefined_struct_1() {
         let program = r#"
             let pt: Point = Point { x: 0, y: 1 }
@@ -3593,17 +3755,19 @@ mod test_typed {
     #[test]
     fn test_aggregates_basic() {
         let program = r#"
-            let factors: (Int, Bool) = (0, true)
+            let factors:(Int,Bool)=( 0, true )
+            let factors2: ( Int, Bool ) = (0,true)
             print factors
-            set factors = (2, false)
+            set factors = (2, false) 
             print factors
 
             struct Point {
                 x: Int
-                y: Str
+                y:Str
             }
 
-            let pt: Point = Point { x: 0, y: "hello" }
+            let pt: Point = Point { x : 0, y : "hello" }
+            let pt2:Point=Point{x:0,y:"hello"}
             print pt
             set pt = Point { x: 3, y: "bye" }
             print pt
@@ -3684,6 +3848,48 @@ Point { x: 2, y: 4 }
 Point { x: 1 }
 Point { x: 2, y: 4 }
 Point { x: 3, y: 5, z: 7 }
+"#
+        )
+    }
+
+    #[test]
+    fn test_nominal_shadowing() {
+        let program = r#"
+            struct Point {
+                x: Int,
+                y: Int,
+                z: Int,
+            }
+
+            let x1: Point = Point { x: 1, y: 3, z: 7 }
+            let x2: Point = Point { x: 2, y: 5, z: 9 }
+            print x1
+            print x2
+
+            struct Point {
+                x: Int,
+                y: Int,
+            }
+
+            set x2 = x1
+            print x1
+            print x2
+
+            let y: Point = Point { x: 3, y: 9 }
+            print y
+
+            ret 0
+        "#;
+
+        let (result, output) = run_typed(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"Point { x: 1, y: 3, z: 7 }
+Point { x: 2, y: 5, z: 9 }
+Point { x: 1, y: 3, z: 7 }
+Point { x: 1, y: 3, z: 7 }
+Point { x: 3, y: 9 }
 "#
         )
     }

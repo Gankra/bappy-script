@@ -126,6 +126,7 @@ impl<'p> Program<'p> {
         (out, self.output)
     }
 
+    #[track_caller]
     pub fn error(&self, message: String, span: Span) -> ! {
         if !self.input_lines.is_empty() {
             let line_number = self.line_number(span);

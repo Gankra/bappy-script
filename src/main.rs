@@ -168,13 +168,17 @@ impl<'p> Program<'p> {
             eprintln!("");
             eprintln!("{} @ program.bappy:{}:{}", message, line_number, start_col);
             eprintln!("");
-            eprintln!("{}", line,);
-            for _ in 0..start_col {
+            for i in line_number.saturating_sub(2)..=line_number {
+                let (_, line) = self.input_lines[i];
+                eprintln!("{:>4} |{}", i, line);
+            }
+            for _ in 0..start_col + 6 {
                 eprint!(" ");
             }
             for _ in start_col..end_col {
                 eprint!("~");
             }
+            eprintln!();
             eprintln!();
         } else {
             eprintln!("");
@@ -235,12 +239,12 @@ struct Function<'p> {
     name: &'p str,
     args: Vec<VarDecl<'p>>,
     stmts: Vec<Statement<'p>>,
-    ty: Ty<'p>,
+    ty: TyName<'p>,
     captures: HashSet<&'p str>,
 }
 
 #[derive(Debug, Clone)]
-struct Struct<'p> {
+struct StructDecl<'p> {
     name: &'p str,
     fields: Vec<FieldDecl<'p>>,
 }
@@ -272,7 +276,7 @@ enum Stmt<'p> {
     Func {
         func: Function<'p>,
     },
-    Struct(Struct<'p>),
+    Struct(StructDecl<'p>),
     Ret {
         expr: Expression<'p>,
     },
@@ -313,12 +317,12 @@ enum Literal<'p> {
 }
 
 impl Literal<'_> {
-    fn ty(&self) -> Ty<'static> {
+    fn ty(&self) -> TyName<'static> {
         match self {
-            Literal::Int(_) => Ty::Int,
-            Literal::Str(_) => Ty::Str,
-            Literal::Bool(_) => Ty::Bool,
-            Literal::Empty(_) => Ty::Empty,
+            Literal::Int(_) => TyName::Int,
+            Literal::Str(_) => TyName::Str,
+            Literal::Bool(_) => TyName::Bool,
+            Literal::Empty(_) => TyName::Empty,
         }
     }
 }
@@ -326,19 +330,19 @@ impl Literal<'_> {
 #[derive(Debug, Clone)]
 struct VarDecl<'p> {
     ident: &'p str,
-    ty: Ty<'p>,
+    ty: TyName<'p>,
 }
 #[derive(Debug, Clone)]
 struct FieldDecl<'p> {
     ident: &'p str,
-    ty: Ty<'p>,
+    ty: TyName<'p>,
 }
 
 // Parse intermediates
 enum Item<'p> {
     Comment(&'p str),
     Struct(&'p str),
-    Func(&'p str, Vec<VarDecl<'p>>, Ty<'p>),
+    Func(&'p str, Vec<VarDecl<'p>>, TyName<'p>),
     Stmt(Stmt<'p>),
     If(Expression<'p>),
     Loop,
@@ -356,7 +360,7 @@ struct Block<'p>(Vec<Statement<'p>>);
 struct Builtin {
     name: &'static str,
     args: &'static [&'static str],
-    ty: Ty<'static>,
+    ty: TyName<'static>,
     func: for<'e, 'p> fn(args: &[Val<'e, 'p>]) -> Val<'e, 'p>,
 }
 
@@ -373,9 +377,9 @@ impl<'p> Program<'p> {
             name: "main",
             args: Vec::new(),
             stmts,
-            ty: Ty::Func {
+            ty: TyName::Func {
                 arg_tys: vec![],
-                return_ty: Box::new(Ty::Int),
+                return_ty: Box::new(TyName::Int),
             },
             captures: HashSet::new(),
         });
@@ -420,7 +424,7 @@ impl<'p> Program<'p> {
                     let (new_i, fields) = self.parse_struct_body(i)?;
                     i = new_i;
 
-                    Stmt::Struct(Struct { name, fields })
+                    Stmt::Struct(StructDecl { name, fields })
                 }
                 Item::Func(name, args, return_ty) => {
                     let (new_i, (Block(block_stmts), terminal)) = self.parse_block(i)?;
@@ -438,7 +442,7 @@ impl<'p> Program<'p> {
 
                     Stmt::Func {
                         func: Function {
-                            ty: Ty::Func {
+                            ty: TyName::Func {
                                 arg_tys: args.iter().map(|decl| decl.ty.clone()).collect(),
                                 return_ty: Box::new(return_ty),
                             },
@@ -578,7 +582,7 @@ fn item_func(i: &str) -> IResult<&str, Item> {
     let (i, return_ty) = if let Ok((i, return_ty)) = return_ty(i) {
         (i, return_ty)
     } else {
-        (i, Ty::Unknown)
+        (i, TyName::Unknown)
     };
     let (i, _) = space0(i)?;
     let (i, _) = tag("{")(i)?;
@@ -596,7 +600,7 @@ fn item_struct(i: &str) -> IResult<&str, Item> {
     Ok((i, Item::Struct(name)))
 }
 
-fn return_ty(i: &str) -> IResult<&str, Ty> {
+fn return_ty(i: &str) -> IResult<&str, TyName> {
     let (i, _) = space0(i)?;
     let (i, _) = tag("->")(i)?;
     let (i, _) = space0(i)?;
@@ -790,7 +794,7 @@ fn var_decl(i: &str) -> IResult<&str, VarDecl> {
         typed_ident,
         map(ident, |id| VarDecl {
             ident: id,
-            ty: Ty::Unknown,
+            ty: TyName::Unknown,
         }),
     ))(i)
 }
@@ -812,7 +816,7 @@ fn typed_ident(i: &str) -> IResult<&str, VarDecl> {
     Ok((i, VarDecl { ident: id, ty }))
 }
 
-fn ty_ref(i: &str) -> IResult<&str, Ty> {
+fn ty_ref(i: &str) -> IResult<&str, TyName> {
     alt((
         ty_ref_int,
         ty_ref_str,
@@ -824,19 +828,19 @@ fn ty_ref(i: &str) -> IResult<&str, Ty> {
     ))(i)
 }
 
-fn ty_ref_int(i: &str) -> IResult<&str, Ty> {
-    map(tag("Int"), |_| Ty::Int)(i)
+fn ty_ref_int(i: &str) -> IResult<&str, TyName> {
+    map(tag("Int"), |_| TyName::Int)(i)
 }
-fn ty_ref_str(i: &str) -> IResult<&str, Ty> {
-    map(tag("Str"), |_| Ty::Str)(i)
+fn ty_ref_str(i: &str) -> IResult<&str, TyName> {
+    map(tag("Str"), |_| TyName::Str)(i)
 }
-fn ty_ref_bool(i: &str) -> IResult<&str, Ty> {
-    map(tag("Bool"), |_| Ty::Bool)(i)
+fn ty_ref_bool(i: &str) -> IResult<&str, TyName> {
+    map(tag("Bool"), |_| TyName::Bool)(i)
 }
-fn ty_ref_empty(i: &str) -> IResult<&str, Ty> {
-    map(tag("()"), |_| Ty::Empty)(i)
+fn ty_ref_empty(i: &str) -> IResult<&str, TyName> {
+    map(tag("()"), |_| TyName::Empty)(i)
 }
-fn ty_ref_func(i: &str) -> IResult<&str, Ty> {
+fn ty_ref_func(i: &str) -> IResult<&str, TyName> {
     let (i, _) = tag("fn")(i)?;
     let (i, _) = space0(i)?;
     let (i, _) = tag("(")(i)?;
@@ -847,22 +851,22 @@ fn ty_ref_func(i: &str) -> IResult<&str, Ty> {
 
     Ok((
         i,
-        Ty::Func {
+        TyName::Func {
             arg_tys,
             return_ty: Box::new(return_ty),
         },
     ))
 }
-fn ty_ref_tuple(i: &str) -> IResult<&str, Ty> {
+fn ty_ref_tuple(i: &str) -> IResult<&str, TyName> {
     let (i, _) = tag("(")(i)?;
     let (i, _) = space0(i)?;
     let (i, tys) = separated_list1(char(','), padded(ty_ref))(i)?;
     let (i, _) = tag(")")(i)?;
 
-    Ok((i, Ty::Tuple(tys)))
+    Ok((i, TyName::Tuple(tys)))
 }
-fn ty_ref_named(i: &str) -> IResult<&str, Ty> {
-    map(ident, |name| Ty::Named(name))(i)
+fn ty_ref_named(i: &str) -> IResult<&str, TyName> {
+    map(ident, |name| TyName::Named(name))(i)
 }
 
 fn struct_item(i: &str) -> IResult<&str, StructItem> {
@@ -921,6 +925,31 @@ where
 //
 //
 
+/// "Names" of types -- the raw output of the parser.
+///
+/// Names should not be used directly for type resolution,
+/// because Nominal types (TyName::Named) will mess things up.
+///
+/// i.e. you don't know which `Point` the type `(Point, Point)` refers to.
+/// With things like inference, they might be different `Point` types!
+///
+/// Instead you should use the TyCtx to convert a TyName to
+/// a `Ty` and `TyIdx` which handle nominal types properly.
+#[derive(Clone, Debug)]
+enum TyName<'p> {
+    Int,
+    Str,
+    Bool,
+    Empty,
+    Func {
+        arg_tys: Vec<TyName<'p>>,
+        return_ty: Box<TyName<'p>>,
+    },
+    Tuple(Vec<TyName<'p>>),
+    Named(&'p str),
+    Unknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Ty<'p> {
     Int,
@@ -928,13 +957,26 @@ enum Ty<'p> {
     Bool,
     Empty,
     Func {
-        arg_tys: Vec<Ty<'p>>,
-        return_ty: Box<Ty<'p>>,
+        arg_tys: Vec<TyIdx>,
+        return_ty: TyIdx,
     },
-    Tuple(Vec<Ty<'p>>),
+    Tuple(Vec<TyIdx>),
     Named(&'p str),
     Unknown,
 }
+
+#[derive(Debug, Clone)]
+struct StructTy<'p> {
+    name: &'p str,
+    fields: Vec<FieldTy<'p>>,
+}
+
+#[derive(Debug, Clone)]
+struct FieldTy<'p> {
+    ident: &'p str,
+    ty: TyIdx,
+}
+
 type TyIdx = usize;
 
 /// Information on all the types.
@@ -977,7 +1019,7 @@ struct CheckEnv<'p> {
     /// The types of variables
     vars: HashMap<&'p str, TyIdx>,
     /// The struct definitions and TyIdx's
-    tys: HashMap<&'p str, (TyIdx, Struct<'p>)>,
+    tys: HashMap<&'p str, (TyIdx, StructTy<'p>)>,
 
     /// Whether this scope is the root of a function
     /// (the scope of its arguments). If you walk over
@@ -1007,18 +1049,35 @@ impl<'p> TyCtx<'p> {
         None
     }
 
-    fn push_struct_decl(&mut self, struct_decl: Struct<'p>) -> TyIdx {
+    fn push_struct_decl(
+        &mut self,
+        program: &mut Program<'p>,
+        struct_decl: StructDecl<'p>,
+    ) -> TyIdx {
         let ty_idx = self.tys.len();
+        let fields = struct_decl
+            .fields
+            .iter()
+            .map(|f| FieldTy {
+                ident: f.ident,
+                ty: self.memoize_ty(program, &f.ty),
+            })
+            .collect();
         self.tys.push(Ty::Named(struct_decl.name));
-        self.envs
-            .last_mut()
-            .unwrap()
-            .tys
-            .insert(struct_decl.name, (ty_idx, struct_decl));
+        self.envs.last_mut().unwrap().tys.insert(
+            struct_decl.name,
+            (
+                ty_idx,
+                StructTy {
+                    name: struct_decl.name,
+                    fields,
+                },
+            ),
+        );
         ty_idx
     }
 
-    fn resolve_nominal_ty<'a>(&'a mut self, ty_name: &'p str) -> Option<&'a (TyIdx, Struct<'p>)> {
+    fn resolve_nominal_ty<'a>(&'a mut self, ty_name: &'p str) -> Option<&'a (TyIdx, StructTy<'p>)> {
         if self.is_typed {
             for (_depth, env) in self.envs.iter_mut().rev().enumerate() {
                 if let Some(ty) = env.tys.get(ty_name) {
@@ -1031,43 +1090,110 @@ impl<'p> TyCtx<'p> {
         }
     }
 
-    fn memoize_ty(&mut self, program: &mut Program<'p>, ty: &Ty<'p>) -> TyIdx {
+    fn memoize_ty(&mut self, program: &mut Program<'p>, ty_name: &TyName<'p>) -> TyIdx {
         if self.is_typed {
-            if let Ty::Named(name) = ty {
-                if let Some((idx, _)) = self.resolve_nominal_ty(name) {
-                    *idx
-                } else {
-                    // TODO: rejig this so the line info is better
-                    program.error(
-                        format!("Compile Error: use of undefined type name: {}", name),
-                        Span {
-                            start: addr(program.input),
-                            end: addr(program.input),
-                        },
-                    )
+            match ty_name {
+                TyName::Int => self.memoize_inner(Ty::Int),
+                TyName::Str => self.memoize_inner(Ty::Str),
+                TyName::Bool => self.memoize_inner(Ty::Bool),
+                TyName::Empty => self.memoize_inner(Ty::Empty),
+                TyName::Unknown => self.memoize_inner(Ty::Unknown),
+                TyName::Func { arg_tys, return_ty } => {
+                    let arg_tys = arg_tys
+                        .iter()
+                        .map(|arg_ty_name| self.memoize_ty(program, arg_ty_name))
+                        .collect();
+                    let return_ty = self.memoize_ty(program, return_ty);
+                    self.memoize_inner(Ty::Func { arg_tys, return_ty })
                 }
-            } else if let Some(idx) = self.ty_map.get(ty) {
-                *idx
-            } else {
-                let ty1 = ty.clone();
-                let ty2 = ty.clone();
-                let idx = self.tys.len();
-                self.ty_map.insert(ty1, idx);
-                self.tys.push(ty2);
-                idx
+                TyName::Tuple(arg_ty_names) => {
+                    let arg_tys = arg_ty_names
+                        .iter()
+                        .map(|arg_ty_name| self.memoize_ty(program, arg_ty_name))
+                        .collect();
+                    self.memoize_inner(Ty::Tuple(arg_tys))
+                }
+                TyName::Named(name) => {
+                    // Nominal types take a separate path because they're scoped
+                    if let Some((idx, _)) = self.resolve_nominal_ty(name) {
+                        *idx
+                    } else {
+                        // TODO: rejig this so the line info is better
+                        program.error(
+                            format!("Compile Error: use of undefined type name: {}", name),
+                            Span {
+                                start: addr(program.input),
+                                end: addr(program.input),
+                            },
+                        )
+                    }
+                }
             }
         } else {
             0
         }
     }
 
-    fn realize_ty(&self, ty: TyIdx) -> &Ty<'p> {
+    fn memoize_inner(&mut self, ty: Ty<'p>) -> TyIdx {
+        if let Some(idx) = self.ty_map.get(&ty) {
+            *idx
+        } else {
+            let ty1 = ty.clone();
+            let ty2 = ty;
+            let idx = self.tys.len();
+            self.ty_map.insert(ty1, idx);
+            self.tys.push(ty2);
+            idx
+        }
+    }
+
+    fn realize_ty(&self, ty: TyIdx) -> &Ty {
         if self.is_typed {
             self.tys
                 .get(ty)
                 .expect("Internal Compiler Error: invalid TyIdx")
         } else {
             &Ty::Unknown
+        }
+    }
+
+    fn format_ty(&self, ty: TyIdx) -> String {
+        match self.realize_ty(ty) {
+            Ty::Int => format!("Int"),
+            Ty::Str => format!("Str"),
+            Ty::Bool => format!("Bool"),
+            Ty::Empty => format!("()"),
+            Ty::Unknown => format!("<unknown>"),
+            Ty::Named(name) => format!("{}", name),
+            Ty::Tuple(arg_tys) => {
+                let mut f = String::new();
+                write!(f, "(").unwrap();
+                for (idx, arg_ty_idx) in arg_tys.iter().enumerate() {
+                    if idx != 0 {
+                        write!(f, ", ").unwrap();
+                    }
+                    let arg = self.format_ty(*arg_ty_idx);
+                    write!(f, "{}", arg).unwrap();
+                }
+                write!(f, ")").unwrap();
+                f
+            }
+            Ty::Func { arg_tys, return_ty } => {
+                let mut f = String::new();
+                write!(f, "fn (").unwrap();
+                for (idx, arg_ty_idx) in arg_tys.iter().enumerate() {
+                    if idx != 0 {
+                        write!(f, ", ").unwrap();
+                    }
+                    let arg = self.format_ty(*arg_ty_idx);
+                    write!(f, "{}", arg).unwrap();
+                }
+                write!(f, ") -> ").unwrap();
+
+                let ret = self.format_ty(*return_ty);
+                write!(f, "{}", ret).unwrap();
+                f
+            }
         }
     }
 }
@@ -1126,10 +1252,10 @@ impl<'p> Program<'p> {
 
         let mut captures = HashSet::new();
 
-        let return_ty = if let Ty::Func { return_ty, .. } = &func.ty {
+        let return_ty = if let TyName::Func { return_ty, .. } = &func.ty {
             &*return_ty
         } else {
-            &Ty::Unknown
+            &TyName::Unknown
         };
         let return_ty = ctx.memoize_ty(self, return_ty);
 
@@ -1163,7 +1289,7 @@ impl<'p> Program<'p> {
                     else_stmts,
                 } => {
                     let expr_ty = self.check_expr(expr, ctx, captures);
-                    let expected_ty = ctx.memoize_ty(self, &Ty::Bool);
+                    let expected_ty = ctx.memoize_ty(self, &TyName::Bool);
 
                     self.check_ty(ctx, expr_ty, expected_ty, "`if`", expr.span);
                     self.check_block(stmts, ctx, captures, return_ty);
@@ -1173,12 +1299,7 @@ impl<'p> Program<'p> {
                     self.check_block(stmts, ctx, captures, return_ty);
                 }
                 Stmt::Struct(struct_decl) => {
-                    let ty_idx = ctx.push_struct_decl(struct_decl.clone());
-                    ctx.envs
-                        .last_mut()
-                        .unwrap()
-                        .tys
-                        .insert(struct_decl.name, (ty_idx, struct_decl.clone()));
+                    ctx.push_struct_decl(self, struct_decl.clone());
                 }
                 Stmt::Func { func } => {
                     // We push a func's name after checking it to avoid
@@ -1267,12 +1388,9 @@ impl<'p> Program<'p> {
             Expr::Tuple(args) => {
                 let arg_tys = args
                     .iter()
-                    .map(|arg| {
-                        let ty = self.check_expr(arg, ctx, captures);
-                        ctx.realize_ty(ty).clone()
-                    })
+                    .map(|arg| self.check_expr(arg, ctx, captures))
                     .collect();
-                ctx.memoize_ty(self, &Ty::Tuple(arg_tys))
+                ctx.memoize_inner(Ty::Tuple(arg_tys))
             }
             Expr::Named { name, args } => {
                 let query = ctx.resolve_nominal_ty(name).cloned();
@@ -1299,7 +1417,7 @@ impl<'p> Program<'p> {
                         }
 
                         let expr_ty = self.check_expr(arg, ctx, captures);
-                        let expected_ty = ctx.memoize_ty(self, &field_decl.ty);
+                        let expected_ty = field_decl.ty;
                         self.check_ty(ctx, expr_ty, expected_ty, "struct literal", arg.span);
                     }
                     ty_idx
@@ -1313,7 +1431,7 @@ impl<'p> Program<'p> {
                     for (_field, arg) in args {
                         self.check_expr(arg, ctx, captures);
                     }
-                    return ctx.memoize_ty(self, &Ty::Named(name));
+                    return ctx.memoize_ty(self, &TyName::Named(name));
                 }
             }
             Expr::Call { func, args } => {
@@ -1325,19 +1443,14 @@ impl<'p> Program<'p> {
                     let var_ty = *var.entry.get();
                     let func_ty = ctx.realize_ty(var_ty).clone();
                     let (arg_tys, return_ty) = if let Ty::Func { arg_tys, return_ty } = func_ty {
-                        let arg_tys = arg_tys.clone();
-                        let return_ty = return_ty.clone();
-                        (
-                            arg_tys.iter().map(|ty| ctx.memoize_ty(self, ty)).collect(),
-                            ctx.memoize_ty(self, &return_ty),
-                        )
+                        (arg_tys.clone(), return_ty)
                     } else if self.typed {
                         self.error(
                             format!("Compile Error: Function call must have Func type!"),
                             expr.span,
                         )
                     } else {
-                        (Vec::new(), ctx.memoize_ty(self, &Ty::Unknown))
+                        (Vec::new(), ctx.memoize_ty(self, &TyName::Unknown))
                     };
 
                     if self.typed && arg_tys.len() != args.len() {
@@ -1356,7 +1469,7 @@ impl<'p> Program<'p> {
                         let expected_ty = arg_tys
                             .get(idx)
                             .copied()
-                            .unwrap_or(ctx.memoize_ty(self, &Ty::Unknown));
+                            .unwrap_or(ctx.memoize_ty(self, &TyName::Unknown));
 
                         self.check_ty(ctx, expr_ty, expected_ty, "arg", arg.span);
                     }
@@ -1381,12 +1494,21 @@ impl<'p> Program<'p> {
         span: Span,
     ) {
         if self.typed && computed_ty != expected_ty {
-            let msg = format!(
-                "Compile Error: {} type mismatch (expected {:?}, got {:?})",
-                env_name,
-                ctx.realize_ty(expected_ty),
-                ctx.realize_ty(computed_ty),
-            );
+            let expected = ctx.format_ty(expected_ty);
+            let computed = ctx.format_ty(computed_ty);
+
+            let msg = if expected != computed {
+                format!(
+                    "Compile Error: {} type mismatch (expected {}, got {})",
+                    env_name, expected, computed,
+                )
+            } else {
+                format!(
+                    r#"Compile Error: {} type mismatch (expected {}, got {})
+NOTE: the types look the same, but the named types have different decls!"#,
+                    env_name, expected, computed,
+                )
+            };
             self.error(msg, span)
         }
     }
@@ -1483,45 +1605,45 @@ fn builtins() -> Vec<Builtin> {
         Builtin {
             name: "add",
             args: &["lhs", "rhs"],
-            ty: Ty::Func {
-                arg_tys: vec![Ty::Int, Ty::Int],
-                return_ty: Box::new(Ty::Int),
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Int, TyName::Int],
+                return_ty: Box::new(TyName::Int),
             },
             func: builtin_add,
         },
         Builtin {
             name: "sub",
             args: &["lhs", "rhs"],
-            ty: Ty::Func {
-                arg_tys: vec![Ty::Int, Ty::Int],
-                return_ty: Box::new(Ty::Int),
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Int, TyName::Int],
+                return_ty: Box::new(TyName::Int),
             },
             func: builtin_sub,
         },
         Builtin {
             name: "mul",
             args: &["lhs", "rhs"],
-            ty: Ty::Func {
-                arg_tys: vec![Ty::Int, Ty::Int],
-                return_ty: Box::new(Ty::Int),
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Int, TyName::Int],
+                return_ty: Box::new(TyName::Int),
             },
             func: builtin_mul,
         },
         Builtin {
             name: "eq",
             args: &["lhs", "rhs"],
-            ty: Ty::Func {
-                arg_tys: vec![Ty::Int, Ty::Int],
-                return_ty: Box::new(Ty::Bool),
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Int, TyName::Int],
+                return_ty: Box::new(TyName::Bool),
             },
             func: builtin_eq,
         },
         Builtin {
             name: "not",
             args: &["rhs"],
-            ty: Ty::Func {
-                arg_tys: vec![Ty::Bool],
-                return_ty: Box::new(Ty::Bool),
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Bool],
+                return_ty: Box::new(TyName::Bool),
             },
             func: builtin_not,
         },
@@ -1564,12 +1686,12 @@ enum Val<'e, 'p> {
 
 /*
 impl Val<'_, '_> {
-    fn ty(&self) -> &Ty {
+    fn ty(&self) -> &TyName {
         match self {
-            Val::Int(_) => &Ty::Int,
-            Val::Str(_) => &Ty::Str,
-            Val::Bool(_) => &Ty::Bool,
-            Val::Empty(_) => &Ty::Empty,
+            Val::Int(_) => &TyName::Int,
+            Val::Str(_) => &TyName::Str,
+            Val::Bool(_) => &TyName::Bool,
+            Val::Empty(_) => &TyName::Empty,
             Val::Func(closure) => &closure.func.ty,
             Val::Builtin(builtin) => &builtin.ty,
         }

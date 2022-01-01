@@ -69,6 +69,7 @@ struct Program<'p> {
 
     /// Printed values resulting from `eval`
     output: Option<String>,
+    cur_eval_span: Span,
 }
 
 impl<'p> Program<'p> {
@@ -94,6 +95,10 @@ impl<'p> Program<'p> {
             main: None,
             builtins: builtins(),
             output: Some(String::new()),
+            cur_eval_span: Span {
+                start: addr(input),
+                end: addr(input),
+            },
         }
     }
 
@@ -1221,7 +1226,10 @@ impl<'p> Program<'p> {
             self.main = Some(main);
             int
         } else {
-            panic!("Runtime Error: main must evaluate to an int!");
+            self.error(
+                format!("Runtime Error: main must evaluate to an int!"),
+                self.cur_eval_span,
+            )
         }
     }
 
@@ -1232,13 +1240,17 @@ impl<'p> Program<'p> {
         captures: HashMap<&'p str, Val<'e, 'p>>,
         envs: &mut Vec<Env<'e, 'p>>,
     ) -> Val<'e, 'p> {
-        assert!(
-            func.args.len() == args.len(),
-            "Runtime Error: mismatched argument count for fn {} (expected {}, got {})",
-            func.name,
-            func.args.len(),
-            args.len(),
-        );
+        if func.args.len() != args.len() {
+            self.error(
+                format!(
+                    "Runtime Error: mismatched argument count for fn {} (expected {}, got {})",
+                    func.name,
+                    func.args.len(),
+                    args.len(),
+                ),
+                self.cur_eval_span,
+            )
+        }
 
         let mut vals = func
             .args
@@ -1246,11 +1258,13 @@ impl<'p> Program<'p> {
             .map(|arg| arg.ident)
             .zip(args.into_iter())
             .collect::<HashMap<_, _>>();
-        assert!(
-            vals.len() == func.args.len(),
-            "Runtime Error: duplicate arg names for fn {}",
-            func.name,
-        );
+
+        if vals.len() != func.args.len() {
+            self.error(
+                format!("Runtime Error: duplicate arg names for fn {}", func.name,),
+                self.cur_eval_span,
+            )
+        }
 
         vals.extend(captures.into_iter());
 
@@ -1260,18 +1274,21 @@ impl<'p> Program<'p> {
 
         match result {
             ControlFlow::Return(val) => val,
-            ControlFlow::Break => {
-                panic!("Runtime Error: break used outside of a loop");
-            }
-            ControlFlow::Continue => {
-                panic!("Runtime Error: continue used outside of a loop");
-            }
-            ControlFlow::None => {
-                panic!(
+            ControlFlow::Break => self.error(
+                format!("Runtime Error: break used outside of a loop"),
+                self.cur_eval_span,
+            ),
+            ControlFlow::Continue => self.error(
+                format!("Runtime Error: continue used outside of a loop"),
+                self.cur_eval_span,
+            ),
+            ControlFlow::None => self.error(
+                format!(
                     "Runtime Error: function didn't return a value: {}",
-                    func.name
-                );
-            }
+                    func.name,
+                ),
+                self.cur_eval_span,
+            ),
         }
     }
 
@@ -1280,7 +1297,12 @@ impl<'p> Program<'p> {
         stmts: &'e [Statement<'p>],
         envs: &mut Vec<Env<'e, 'p>>,
     ) -> ControlFlow<'e, 'p> {
-        for Statement { code: stmt, .. } in stmts {
+        for Statement {
+            code: stmt,
+            span: stmt_span,
+        } in stmts
+        {
+            self.cur_eval_span = *stmt_span;
             match stmt {
                 Stmt::Let { name, expr } => {
                     let val = self.eval_expr(expr, envs);
@@ -1289,11 +1311,16 @@ impl<'p> Program<'p> {
                 Stmt::Set { name, expr } => {
                     let val = self.eval_expr(expr, envs);
                     let old = envs.last_mut().unwrap().vals.insert(*name, val);
-                    assert!(
-                        old.is_some(),
-                        "Runtime Error: Tried to set an undefined local variable {}",
-                        name
-                    );
+
+                    if old.is_none() {
+                        self.error(
+                            format!(
+                                "Runtime Error: Tried to set an undefined local variable {}",
+                                name
+                            ),
+                            *stmt_span,
+                        )
+                    }
                 }
                 Stmt::Func { func } => {
                     let captures = func
@@ -1316,10 +1343,11 @@ impl<'p> Program<'p> {
                         Val::Bool(true) => self.eval_block(stmts, envs),
                         Val::Bool(false) => self.eval_block(else_stmts, envs),
                         val => {
-                            panic!(
-                                "Runtime Error: Tried to branch on non-boolean {}",
-                                self.format_val(&val, true, 0)
-                            );
+                            let val = self.format_val(&val, true, 0);
+                            self.error(
+                                format!("Runtime Error: Tried to branch on non-boolean {}", val),
+                                expr.span,
+                            )
                         }
                     };
 
@@ -1362,6 +1390,7 @@ impl<'p> Program<'p> {
     }
 
     fn eval_expr<'e>(&mut self, expr: &Expression<'p>, envs: &mut Vec<Env<'e, 'p>>) -> Val<'e, 'p> {
+        self.cur_eval_span = expr.span;
         match &expr.code {
             Expr::Call {
                 func: func_name,
@@ -1376,11 +1405,14 @@ impl<'p> Program<'p> {
                     }
                     Val::Builtin(builtin) => (builtin.func)(&evaled_args),
                     _ => {
-                        panic!(
-                            "Runtime Error: Tried to call a non-function {}: {}",
-                            func_name,
-                            self.format_val(&func, true, 0)
-                        );
+                        let val = self.format_val(&func, true, 0);
+                        self.error(
+                            format!(
+                                "Runtime Error: Tried to call a non-function {}: {}",
+                                func_name, val,
+                            ),
+                            expr.span,
+                        )
                     }
                 }
             }
@@ -1400,7 +1432,10 @@ impl<'p> Program<'p> {
                 return val.clone();
             }
         }
-        panic!("Runtime Error: Use of undefined var {}", var);
+        self.error(
+            format!("Runtime Error: Use of undefined var {}", var),
+            self.cur_eval_span,
+        )
     }
 
     fn print_val<'e>(&mut self, val: &Val<'e, 'p>) {

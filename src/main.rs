@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Write};
 
 use nom::{
@@ -7,7 +7,7 @@ use nom::{
     character::complete::{alpha1, alphanumeric1, char, space0, space1},
     combinator::{map, recognize, rest},
     error::ParseError,
-    multi::{many0, separated_list0},
+    multi::{many0, separated_list0, separated_list1},
     sequence::pair,
     AsChar, IResult, InputTakeAtPosition, Parser,
 };
@@ -35,17 +35,22 @@ use nom::{
 //
 
 const MAIN_PROGRAM: &str = r#"
-    let factor: Int = 3
-    fn get_factor() -> Int {
-        ret factor
-    }
-    fn multi(factory: fn() -> Int, x: Int) -> Int {
-        ret mul(x, factory())
+    let factors: (Int, Bool) = (0, true)
+    print factors
+    set factors = (2, false)
+    print factors
+
+    struct Point {
+        x: Int
+        y: Int
     }
 
-    let x: Int = 7
+    let pt: Point = Point { x: 0, y: 1 }
+    print pt
+    set pt = Point { x: 3, y: 4 }
+    print pt
 
-    ret multi(get_factor, x)
+    ret 0
 "#;
 
 fn main() {
@@ -208,8 +213,14 @@ struct Function<'p> {
     name: &'p str,
     args: Vec<VarDecl<'p>>,
     stmts: Vec<Statement<'p>>,
-    ty: Ty,
+    ty: Ty<'p>,
     captures: HashSet<&'p str>,
+}
+
+#[derive(Debug, Clone)]
+struct Struct<'p> {
+    name: &'p str,
+    fields: Vec<FieldDecl<'p>>,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +250,7 @@ enum Stmt<'p> {
     Func {
         func: Function<'p>,
     },
+    Struct(Struct<'p>),
     Ret {
         expr: Expression<'p>,
     },
@@ -263,6 +275,11 @@ enum Expr<'p> {
     },
     Lit(Literal<'p>),
     Var(&'p str),
+    Tuple(Vec<Expression<'p>>),
+    Named {
+        name: &'p str,
+        args: Vec<(&'p str, Expression<'p>)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -274,7 +291,7 @@ enum Literal<'p> {
 }
 
 impl Literal<'_> {
-    fn ty(&self) -> Ty {
+    fn ty(&self) -> Ty<'static> {
         match self {
             Literal::Int(_) => Ty::Int,
             Literal::Str(_) => Ty::Str,
@@ -287,17 +304,27 @@ impl Literal<'_> {
 #[derive(Debug, Clone)]
 struct VarDecl<'p> {
     ident: &'p str,
-    ty: Ty,
+    ty: Ty<'p>,
+}
+#[derive(Debug, Clone)]
+struct FieldDecl<'p> {
+    ident: &'p str,
+    ty: Ty<'p>,
 }
 
 // Parse intermediates
 enum Item<'p> {
     Comment(&'p str),
-    Func(&'p str, Vec<VarDecl<'p>>, Ty),
+    Struct(&'p str),
+    Func(&'p str, Vec<VarDecl<'p>>, Ty<'p>),
     Stmt(Stmt<'p>),
     If(Expression<'p>),
     Loop,
     Else,
+    End,
+}
+enum StructItem<'p> {
+    Field(FieldDecl<'p>),
     End,
 }
 
@@ -307,7 +334,7 @@ struct Block<'p>(Vec<Statement<'p>>);
 struct Builtin {
     name: &'static str,
     args: &'static [&'static str],
-    ty: Ty,
+    ty: Ty<'static>,
     func: for<'e, 'p> fn(args: &[Val<'e, 'p>]) -> Val<'e, 'p>,
 }
 
@@ -367,6 +394,12 @@ impl<'p> Program<'p> {
             let stmt_end = addr(rest_of_line);
 
             let stmt = match item {
+                Item::Struct(name) => {
+                    let (new_i, fields) = self.parse_struct_body(i)?;
+                    i = new_i;
+
+                    Stmt::Struct(Struct { name, fields })
+                }
                 Item::Func(name, args, return_ty) => {
                     let (new_i, (Block(block_stmts), terminal)) = self.parse_block(i)?;
                     i = new_i;
@@ -456,6 +489,35 @@ impl<'p> Program<'p> {
             });
         }
     }
+    fn parse_struct_body(&mut self, mut i: &'p str) -> IResult<&'p str, Vec<FieldDecl<'p>>> {
+        let mut fields = Vec::new();
+        loop {
+            if i.trim().is_empty() {
+                return Ok((i, fields));
+            }
+
+            let (new_i, line) = take_until("\n")(i)?;
+            self.input_lines.push((addr(line), line));
+            println!("{}", line);
+            i = &new_i[1..];
+            let line = line.trim();
+
+            if line.is_empty() {
+                continue;
+            }
+
+            // let stmt_start = addr(line);
+            let (_rest_of_line, item) = struct_item(line)?;
+            // let stmt_end = addr(rest_of_line);
+
+            match item {
+                StructItem::Field(field) => {
+                    fields.push(field);
+                }
+                StructItem::End => return Ok((i, fields)),
+            }
+        }
+    }
 }
 
 fn addr(input: &str) -> usize {
@@ -470,6 +532,7 @@ fn item(i: &str) -> IResult<&str, Item> {
         item_if,
         item_loop,
         item_func,
+        item_struct,
         item_stmt,
     ))(i)
 }
@@ -501,11 +564,21 @@ fn item_func(i: &str) -> IResult<&str, Item> {
     Ok((i, Item::Func(name, args, return_ty)))
 }
 
+fn item_struct(i: &str) -> IResult<&str, Item> {
+    let (i, _) = tag("struct")(i)?;
+    let (i, _) = space1(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("{")(i)?;
+
+    Ok((i, Item::Struct(name)))
+}
+
 fn return_ty(i: &str) -> IResult<&str, Ty> {
     let (i, _) = space0(i)?;
     let (i, _) = tag("->")(i)?;
     let (i, _) = space0(i)?;
-    ty_decl(i)
+    ty_ref(i)
 }
 
 fn item_if(i: &str) -> IResult<&str, Item> {
@@ -604,7 +677,7 @@ fn stmt_print(i: &str) -> IResult<&str, Stmt> {
 
 fn expr(i: &str) -> IResult<&str, Expression> {
     let start_of_expr = addr(i);
-    let (i, expr) = alt((expr_call, expr_lit, expr_var))(i)?;
+    let (i, expr) = alt((expr_tuple, expr_named, expr_call, expr_lit, expr_var))(i)?;
     let end_of_expr = addr(i);
 
     Ok((
@@ -636,6 +709,36 @@ fn expr_var(i: &str) -> IResult<&str, Expr> {
 
 fn expr_lit(i: &str) -> IResult<&str, Expr> {
     map(alt((lit_int, lit_str, lit_bool, lit_empty)), Expr::Lit)(i)
+}
+
+fn expr_tuple(i: &str) -> IResult<&str, Expr> {
+    let (i, _) = tag("(")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, args) = separated_list1(char(','), padded(expr))(i)?;
+    let (i, _) = tag(")")(i)?;
+
+    Ok((i, Expr::Tuple(args)))
+}
+
+fn expr_named(i: &str) -> IResult<&str, Expr> {
+    let (i, name) = ident(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("{")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, args) = separated_list0(char(','), padded(expr_named_init))(i)?;
+    let (i, _) = tag("}")(i)?;
+
+    Ok((i, Expr::Named { name, args }))
+}
+
+fn expr_named_init(i: &str) -> IResult<&str, (&str, Expression)> {
+    let (i, id) = ident(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag(":")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, expr) = expr(i)?;
+
+    Ok((i, (id, expr)))
 }
 
 fn lit_int(i: &str) -> IResult<&str, Literal> {
@@ -678,46 +781,45 @@ fn ident(i: &str) -> IResult<&str, &str> {
 }
 
 fn typed_ident(i: &str) -> IResult<&str, VarDecl> {
-    let (i, id) = recognize(pair(
-        alt((alpha1, tag("_"))),
-        many0(alt((alphanumeric1, tag("_")))),
-    ))(i)?;
+    let (i, id) = ident(i)?;
     let (i, _) = space0(i)?;
     let (i, _) = tag(":")(i)?;
     let (i, _) = space0(i)?;
-    let (i, ty) = ty_decl(i)?;
+    let (i, ty) = ty_ref(i)?;
 
     Ok((i, VarDecl { ident: id, ty }))
 }
 
-fn ty_decl(i: &str) -> IResult<&str, Ty> {
+fn ty_ref(i: &str) -> IResult<&str, Ty> {
     alt((
-        ty_decl_int,
-        ty_decl_str,
-        ty_decl_empty,
-        ty_decl_bool,
-        ty_decl_func,
+        ty_ref_int,
+        ty_ref_str,
+        ty_ref_empty,
+        ty_ref_bool,
+        ty_ref_func,
+        ty_ref_tuple,
+        ty_ref_named,
     ))(i)
 }
 
-fn ty_decl_int(i: &str) -> IResult<&str, Ty> {
+fn ty_ref_int(i: &str) -> IResult<&str, Ty> {
     map(tag("Int"), |_| Ty::Int)(i)
 }
-fn ty_decl_str(i: &str) -> IResult<&str, Ty> {
+fn ty_ref_str(i: &str) -> IResult<&str, Ty> {
     map(tag("Str"), |_| Ty::Str)(i)
 }
-fn ty_decl_bool(i: &str) -> IResult<&str, Ty> {
+fn ty_ref_bool(i: &str) -> IResult<&str, Ty> {
     map(tag("Bool"), |_| Ty::Bool)(i)
 }
-fn ty_decl_empty(i: &str) -> IResult<&str, Ty> {
+fn ty_ref_empty(i: &str) -> IResult<&str, Ty> {
     map(tag("()"), |_| Ty::Empty)(i)
 }
-fn ty_decl_func(i: &str) -> IResult<&str, Ty> {
+fn ty_ref_func(i: &str) -> IResult<&str, Ty> {
     let (i, _) = tag("fn")(i)?;
     let (i, _) = space0(i)?;
     let (i, _) = tag("(")(i)?;
     let (i, _) = space0(i)?;
-    let (i, arg_tys) = separated_list0(char(','), padded(ty_decl))(i)?;
+    let (i, arg_tys) = separated_list0(char(','), padded(ty_ref))(i)?;
     let (i, _) = tag(")")(i)?;
     let (i, return_ty) = return_ty(i)?;
 
@@ -728,6 +830,35 @@ fn ty_decl_func(i: &str) -> IResult<&str, Ty> {
             return_ty: Box::new(return_ty),
         },
     ))
+}
+fn ty_ref_tuple(i: &str) -> IResult<&str, Ty> {
+    let (i, _) = tag("(")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, tys) = separated_list1(char(','), padded(ty_ref))(i)?;
+    let (i, _) = tag(")")(i)?;
+
+    Ok((i, Ty::Tuple(tys)))
+}
+fn ty_ref_named(i: &str) -> IResult<&str, Ty> {
+    map(ident, |name| Ty::Named(name))(i)
+}
+
+fn struct_item(i: &str) -> IResult<&str, StructItem> {
+    alt((struct_item_field, struct_item_end))(i)
+}
+fn struct_item_field(i: &str) -> IResult<&str, StructItem> {
+    let (i, id) = ident(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag(":")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, ty) = ty_ref(i)?;
+
+    Ok((i, StructItem::Field(FieldDecl { ident: id, ty })))
+}
+fn struct_item_end(i: &str) -> IResult<&str, StructItem> {
+    let (i, _) = tag("}")(i)?;
+    // TODO: require rest of line to be whitespace
+    Ok((i, StructItem::End))
 }
 
 pub fn padded<F, T, O, E>(mut parser: F) -> impl FnMut(T) -> IResult<T, O, E>
@@ -769,20 +900,26 @@ where
 //
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Ty {
+enum Ty<'p> {
     Int,
     Str,
     Bool,
     Empty,
     Func {
-        arg_tys: Vec<Ty>,
-        return_ty: Box<Ty>,
+        arg_tys: Vec<Ty<'p>>,
+        return_ty: Box<Ty<'p>>,
     },
+    Tuple(Vec<Ty<'p>>),
+    Named(&'p str),
     Unknown,
 }
 
 struct CheckEnv<'p> {
-    vars: HashMap<&'p str, Ty>,
+    vars: HashMap<&'p str, Ty<'p>>,
+}
+struct CheckEntry<'a, 'p> {
+    is_local: bool,
+    entry: std::collections::hash_map::OccupiedEntry<'a, &'p str, Ty<'p>>,
 }
 
 impl<'p> Program<'p> {
@@ -847,7 +984,7 @@ impl<'p> Program<'p> {
         stmts: &mut [Statement<'p>],
         envs: &mut Vec<CheckEnv<'p>>,
         captures: &mut HashSet<&'p str>,
-        return_ty: &Ty,
+        return_ty: &Ty<'p>,
         func_subscope_depth: &mut usize,
     ) {
         *func_subscope_depth += 1;
@@ -867,21 +1004,16 @@ impl<'p> Program<'p> {
                 } => {
                     let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
                     let expected_ty = Ty::Bool;
-                    if self.typed && expr_ty != expected_ty {
-                        self.error(
-                            format!(
-                                "Compile Error: `if` type mismatch (expected {:?}, got {:?})",
-                                expected_ty, expr_ty
-                            ),
-                            expr.span,
-                        );
-                    }
 
+                    self.check_ty(&expr_ty, &expected_ty, "`if`", expr.span);
                     self.check_block(stmts, envs, captures, return_ty, func_subscope_depth);
                     self.check_block(else_stmts, envs, captures, return_ty, func_subscope_depth);
                 }
                 Stmt::Loop { stmts } => {
                     self.check_block(stmts, envs, captures, return_ty, func_subscope_depth);
+                }
+                Stmt::Struct(struct_decl) => {
+                    // TODO: add to type system
                 }
                 Stmt::Func { func } => {
                     // We push a func's name after checking it to avoid
@@ -897,47 +1029,24 @@ impl<'p> Program<'p> {
                     let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
                     let expected_ty = &name.ty;
 
-                    if self.typed && &expr_ty != expected_ty {
-                        self.error(
-                            format!(
-                                "Compile Error: `let` type mismatch (expected {:?}, got {:?})",
-                                expected_ty, expr_ty,
-                            ),
-                            expr.span,
-                        )
-                    }
+                    self.check_ty(&expr_ty, &expected_ty, "`let`", expr.span);
 
                     envs.last_mut().unwrap().vars.insert(name.ident, expr_ty);
                 }
                 Stmt::Set { name, expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
 
-                    let mut found = false;
-                    for (depth, env) in envs.iter_mut().rev().enumerate() {
-                        if let Some(expected_ty) = env.vars.get(name) {
-                            if depth <= *func_subscope_depth {
-                                if self.typed && &expr_ty != expected_ty {
-                                    self.error(
-                                        format!(
-                                            "Compile Error: `set` type mismatch (expected {:?}, got {:?})",
-                                            expected_ty, expr_ty
-                                        ),
-                                        expr.span,
-                                    )
-                                }
-                                found = true;
-                                env.vars.insert(name, expr_ty).unwrap();
-                                break;
-                            } else {
-                                self.error(
-                                    format!("Compile Error: Trying to `set` captured variable '{}' (captures are by-value!)", name),
-                                    *stmt_span,
-                                )
-                            }
+                    if let Some(mut var) = self.resolve_var(name, envs, func_subscope_depth) {
+                        if var.is_local {
+                            self.check_ty(&expr_ty, var.entry.get(), "`set`", expr.span);
+                            var.entry.insert(expr_ty);
+                        } else {
+                            self.error(
+                                format!("Compile Error: Trying to `set` captured variable '{}' (captures are by-value!)", name),
+                                *stmt_span,
+                            )
                         }
-                    }
-
-                    if !found {
+                    } else {
                         self.error(
                             format!(
                                 "Compile Error: Trying to `set` undefined variable '{}'",
@@ -949,17 +1058,8 @@ impl<'p> Program<'p> {
                 }
                 Stmt::Ret { expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
-                    let expected_ty = return_ty;
 
-                    if self.typed && &expr_ty != expected_ty {
-                        self.error(
-                            format!(
-                                "Compile Error: Return type mismatch (expected {:?}, got {:?})",
-                                expected_ty, expr_ty
-                            ),
-                            expr.span,
-                        );
-                    }
+                    self.check_ty(&expr_ty, return_ty, "return", expr.span);
                 }
                 Stmt::Print { expr } => {
                     let _expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
@@ -981,32 +1081,43 @@ impl<'p> Program<'p> {
         envs: &mut Vec<CheckEnv<'p>>,
         captures: &mut HashSet<&'p str>,
         func_subscope_depth: &mut usize,
-    ) -> Ty {
+    ) -> Ty<'p> {
         match &expr.code {
             Expr::Lit(lit) => {
                 return lit.ty();
             }
             Expr::Var(var_name) => {
-                for (depth, env) in envs.iter().rev().enumerate() {
-                    if let Some(ty) = env.vars.get(var_name) {
-                        if depth <= *func_subscope_depth {
-                            // Do nothing, not a capture
-                        } else {
-                            captures.insert(var_name);
-                        }
-                        return ty.clone();
+                if let Some(var) = self.resolve_var(var_name, envs, func_subscope_depth) {
+                    if !var.is_local {
+                        captures.insert(var_name);
                     }
+                    return var.entry.get().clone();
+                } else {
+                    self.error(
+                        format!("Compile Error: Use of undefined variable '{}'", var_name),
+                        expr.span,
+                    )
                 }
-                self.error(
-                    format!("Compile Error: Use of undefined variable '{}'", var_name),
-                    expr.span,
-                )
+            }
+            Expr::Tuple(args) => {
+                let arg_tys = args
+                    .iter()
+                    .map(|arg| self.check_expr(arg, envs, captures, func_subscope_depth))
+                    .collect();
+                Ty::Tuple(arg_tys)
+            }
+            Expr::Named { name, args } => {
+                for (field, arg) in args {
+                    self.check_expr(arg, envs, captures, func_subscope_depth);
+                    // TODO: check that the type with this name has this field
+                }
+                // TODO: check that all fields initialized
+                Ty::Named(name)
             }
             Expr::Call { func, args } => {
-                for (depth, env) in envs.iter().rev().enumerate() {
-                    if let Some(func_ty) = env.vars.get(func) {
-                        let (arg_tys, return_ty) = if let Ty::Func { arg_tys, return_ty } = func_ty
-                        {
+                if let Some(var) = self.resolve_var(func, envs, func_subscope_depth) {
+                    let (arg_tys, return_ty) =
+                        if let Ty::Func { arg_tys, return_ty } = var.entry.get() {
                             (arg_tys.clone(), (**return_ty).clone())
                         } else if self.typed {
                             self.error(
@@ -1017,47 +1128,64 @@ impl<'p> Program<'p> {
                             (Vec::new(), Ty::Unknown)
                         };
 
-                        if depth <= *func_subscope_depth {
-                            // Do nothing, not a capture
-                        } else {
-                            captures.insert(func);
-                        }
-
-                        if self.typed && arg_tys.len() != args.len() {
-                            self.error(
-                                format!(
-                                    "Compile Error: arg count mismatch (expected {:?}, got {:?})",
-                                    arg_tys.len(),
-                                    args.len(),
-                                ),
-                                expr.span,
-                            )
-                        }
-
-                        for (idx, arg_expr) in args.iter().enumerate() {
-                            let expr_ty =
-                                self.check_expr(arg_expr, envs, captures, func_subscope_depth);
-                            let expected_ty = arg_tys.get(idx).unwrap_or(&Ty::Unknown);
-
-                            if self.typed && &expr_ty != expected_ty {
-                                self.error(
-                                    format!(
-                                        "Compile Error: arg type mismatch (expected {:?}, got {:?})",
-                                        expected_ty,
-                                        expr_ty
-                                    ),
-                                    arg_expr.span,
-                                )
-                            }
-                        }
-                        return return_ty;
+                    if !var.is_local {
+                        captures.insert(func);
                     }
+
+                    if self.typed && arg_tys.len() != args.len() {
+                        self.error(
+                            format!(
+                                "Compile Error: arg count mismatch (expected {:?}, got {:?})",
+                                arg_tys.len(),
+                                args.len(),
+                            ),
+                            expr.span,
+                        )
+                    }
+
+                    for (idx, arg) in args.iter().enumerate() {
+                        let expr_ty = self.check_expr(arg, envs, captures, func_subscope_depth);
+                        let expected_ty = arg_tys.get(idx).unwrap_or(&Ty::Unknown);
+
+                        self.check_ty(&expr_ty, &expected_ty, "arg", arg.span);
+                    }
+                    return return_ty;
+                } else {
+                    self.error(
+                        format!("Compile Error: Call of undefined function '{}'", func),
+                        expr.span,
+                    )
                 }
-                self.error(
-                    format!("Compile Error: Call of undefined function '{}'", func),
-                    expr.span,
-                )
             }
+        }
+    }
+
+    fn resolve_var<'a>(
+        &mut self,
+        var_name: &'p str,
+        envs: &'a mut Vec<CheckEnv<'p>>,
+        func_subscope_depth: &mut usize,
+    ) -> Option<CheckEntry<'a, 'p>> {
+        use std::collections::hash_map::Entry;
+        for (depth, env) in envs.iter_mut().rev().enumerate() {
+            if let Entry::Occupied(entry) = env.vars.entry(var_name) {
+                let is_local = depth <= *func_subscope_depth;
+                return Some(CheckEntry { is_local, entry });
+            }
+        }
+        None
+    }
+
+    #[track_caller]
+    fn check_ty(&mut self, computed_ty: &Ty<'p>, expected_ty: &Ty<'p>, env_name: &str, span: Span) {
+        if self.typed && computed_ty != expected_ty {
+            self.error(
+                format!(
+                    "Compile Error: {} type mismatch (expected {:?}, got {:?})",
+                    env_name, expected_ty, computed_ty
+                ),
+                span,
+            )
         }
     }
 }
@@ -1226,6 +1354,8 @@ enum Val<'e, 'p> {
     Str(&'p str),
     Bool(bool),
     Empty(()),
+    Tuple(Vec<Val<'e, 'p>>),
+    Struct(&'p str, BTreeMap<&'p str, Val<'e, 'p>>),
     Func(Closure<'e, 'p>),
     Builtin(Builtin),
 }
@@ -1396,6 +1526,9 @@ impl<'p> Program<'p> {
                         )
                     }
                 }
+                Stmt::Struct(struct_decl) => {
+                    // TODO: ?
+                }
                 Stmt::Func { func } => {
                     let captures = func
                         .captures
@@ -1500,6 +1633,17 @@ impl<'p> Program<'p> {
                     }
                 }
             }
+            Expr::Tuple(args) => {
+                let evaled_args = args.iter().map(|arg| self.eval_expr(arg, envs)).collect();
+                Val::Tuple(evaled_args)
+            }
+            Expr::Named { name, args } => {
+                let evaled_fields = args
+                    .iter()
+                    .map(|(field, expr)| (*field, self.eval_expr(expr, envs)))
+                    .collect();
+                Val::Struct(name, evaled_fields)
+            }
             Expr::Var(var) => self.eval_resolve_var(var, envs),
             Expr::Lit(lit) => match lit {
                 Literal::Int(val) => Val::Int(*val),
@@ -1549,6 +1693,33 @@ impl<'p> Program<'p> {
             }
             Val::Empty(_) => {
                 format!("()")
+            }
+            Val::Tuple(tuple) => {
+                let mut f = String::new();
+                write!(f, "(").unwrap();
+                for (idx, val) in tuple.iter().enumerate() {
+                    if idx != 0 {
+                        write!(f, ", ").unwrap();
+                    }
+                    let val = self.format_val(val, debug, indent);
+                    write!(f, "{}", val).unwrap();
+                }
+                write!(f, ")").unwrap();
+                f
+            }
+            Val::Struct(name, args) => {
+                let mut f = String::new();
+                write!(f, "{} {{ ", name).unwrap();
+                for (idx, (field, val)) in args.iter().enumerate() {
+                    if idx != 0 {
+                        write!(f, ", ").unwrap();
+                    }
+                    // Debug print fields unconditionally to make 0 vs "0" clear
+                    let val = self.format_val(val, true, indent);
+                    write!(f, "{}: {}", field, val).unwrap();
+                }
+                write!(f, " }}").unwrap();
+                f
             }
             Val::Func(closure) => {
                 let mut f = String::new();

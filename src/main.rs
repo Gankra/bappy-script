@@ -72,6 +72,11 @@ struct Program<'p> {
     /// Builtin functions ("the stdlib")
     builtins: Vec<Builtin>,
 
+    /// Mappings from types we've seen to type indices
+    ty_map: HashMap<Ty<'p>, TyIdx>,
+    /// The list of every known type
+    tys: Vec<Ty<'p>>,
+
     /// Printed values resulting from `eval`
     output: Option<String>,
     cur_eval_span: Span,
@@ -104,6 +109,8 @@ impl<'p> Program<'p> {
                 start: addr(input),
                 end: addr(input),
             },
+            ty_map: HashMap::new(),
+            tys: Vec::new(),
         }
     }
 
@@ -899,7 +906,7 @@ where
 //
 //
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Ty<'p> {
     Int,
     Str,
@@ -913,23 +920,28 @@ enum Ty<'p> {
     Named(&'p str),
     Unknown,
 }
-
+type TyIdx = usize;
 struct CheckEnv<'p> {
-    vars: HashMap<&'p str, Ty<'p>>,
+    vars: HashMap<&'p str, TyIdx>,
+    tys: HashMap<&'p str, TyIdx>,
 }
 struct CheckEntry<'a, 'p> {
     is_local: bool,
-    entry: std::collections::hash_map::OccupiedEntry<'a, &'p str, Ty<'p>>,
+    entry: std::collections::hash_map::OccupiedEntry<'a, &'p str, TyIdx>,
 }
 
 impl<'p> Program<'p> {
     fn check(&mut self) {
         let builtins = self
             .builtins
+            .clone()
             .iter()
-            .map(|builtin| (builtin.name, builtin.ty.clone()))
+            .map(|builtin| (builtin.name, self.memoize_ty(&builtin.ty)))
             .collect();
-        let mut envs = vec![CheckEnv { vars: builtins }];
+        let mut envs = vec![CheckEnv {
+            vars: builtins,
+            tys: HashMap::new(),
+        }];
         let mut main = self.main.take().unwrap();
         self.check_func(&mut main, &mut envs);
 
@@ -950,9 +962,12 @@ impl<'p> Program<'p> {
         let vars = func
             .args
             .iter()
-            .map(|decl| (decl.ident, decl.ty.clone()))
+            .map(|decl| (decl.ident, self.memoize_ty(&decl.ty)))
             .collect();
-        envs.push(CheckEnv { vars });
+        envs.push(CheckEnv {
+            vars,
+            tys: HashMap::new(),
+        });
 
         // func_subscope_depth helps us keep track of how many scopes we are nested
         // in *within* the body of this function. This is important because if we
@@ -966,6 +981,7 @@ impl<'p> Program<'p> {
         } else {
             &Ty::Unknown
         };
+        let return_ty = self.memoize_ty(return_ty);
 
         self.check_block(
             &mut func.stmts,
@@ -984,12 +1000,13 @@ impl<'p> Program<'p> {
         stmts: &mut [Statement<'p>],
         envs: &mut Vec<CheckEnv<'p>>,
         captures: &mut HashSet<&'p str>,
-        return_ty: &Ty<'p>,
+        return_ty: TyIdx,
         func_subscope_depth: &mut usize,
     ) {
         *func_subscope_depth += 1;
         envs.push(CheckEnv {
             vars: HashMap::new(),
+            tys: HashMap::new(),
         });
         for Statement {
             code: stmt,
@@ -1003,9 +1020,9 @@ impl<'p> Program<'p> {
                     else_stmts,
                 } => {
                     let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
-                    let expected_ty = Ty::Bool;
+                    let expected_ty = self.memoize_ty(&Ty::Bool);
 
-                    self.check_ty(&expr_ty, &expected_ty, "`if`", expr.span);
+                    self.check_ty(expr_ty, expected_ty, "`if`", expr.span);
                     self.check_block(stmts, envs, captures, return_ty, func_subscope_depth);
                     self.check_block(else_stmts, envs, captures, return_ty, func_subscope_depth);
                 }
@@ -1013,7 +1030,11 @@ impl<'p> Program<'p> {
                     self.check_block(stmts, envs, captures, return_ty, func_subscope_depth);
                 }
                 Stmt::Struct(struct_decl) => {
-                    // TODO: add to type system
+                    let ty_idx = self.memoize_ty(&Ty::Named(struct_decl.name));
+                    envs.last_mut()
+                        .unwrap()
+                        .tys
+                        .insert(struct_decl.name, ty_idx);
                 }
                 Stmt::Func { func } => {
                     // We push a func's name after checking it to avoid
@@ -1023,13 +1044,13 @@ impl<'p> Program<'p> {
                     envs.last_mut()
                         .unwrap()
                         .vars
-                        .insert(func.name, func.ty.clone());
+                        .insert(func.name, self.memoize_ty(&func.ty));
                 }
                 Stmt::Let { name, expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
-                    let expected_ty = &name.ty;
+                    let expected_ty = self.memoize_ty(&name.ty);
 
-                    self.check_ty(&expr_ty, &expected_ty, "`let`", expr.span);
+                    self.check_ty(expr_ty, expected_ty, "`let`", expr.span);
 
                     envs.last_mut().unwrap().vars.insert(name.ident, expr_ty);
                 }
@@ -1038,7 +1059,7 @@ impl<'p> Program<'p> {
 
                     if let Some(mut var) = self.resolve_var(name, envs, func_subscope_depth) {
                         if var.is_local {
-                            self.check_ty(&expr_ty, var.entry.get(), "`set`", expr.span);
+                            self.check_ty(expr_ty, *var.entry.get(), "`set`", expr.span);
                             var.entry.insert(expr_ty);
                         } else {
                             self.error(
@@ -1059,7 +1080,7 @@ impl<'p> Program<'p> {
                 Stmt::Ret { expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
 
-                    self.check_ty(&expr_ty, return_ty, "return", expr.span);
+                    self.check_ty(expr_ty, return_ty, "return", expr.span);
                 }
                 Stmt::Print { expr } => {
                     let _expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
@@ -1081,17 +1102,17 @@ impl<'p> Program<'p> {
         envs: &mut Vec<CheckEnv<'p>>,
         captures: &mut HashSet<&'p str>,
         func_subscope_depth: &mut usize,
-    ) -> Ty<'p> {
+    ) -> TyIdx {
         match &expr.code {
             Expr::Lit(lit) => {
-                return lit.ty();
+                return self.memoize_ty(&lit.ty());
             }
             Expr::Var(var_name) => {
                 if let Some(var) = self.resolve_var(var_name, envs, func_subscope_depth) {
                     if !var.is_local {
                         captures.insert(var_name);
                     }
-                    return var.entry.get().clone();
+                    return *var.entry.get();
                 } else {
                     self.error(
                         format!("Compile Error: Use of undefined variable '{}'", var_name),
@@ -1102,9 +1123,12 @@ impl<'p> Program<'p> {
             Expr::Tuple(args) => {
                 let arg_tys = args
                     .iter()
-                    .map(|arg| self.check_expr(arg, envs, captures, func_subscope_depth))
+                    .map(|arg| {
+                        let ty = self.check_expr(arg, envs, captures, func_subscope_depth);
+                        self.realize_ty(ty).clone()
+                    })
                     .collect();
-                Ty::Tuple(arg_tys)
+                self.memoize_ty(&Ty::Tuple(arg_tys))
             }
             Expr::Named { name, args } => {
                 for (field, arg) in args {
@@ -1112,21 +1136,27 @@ impl<'p> Program<'p> {
                     // TODO: check that the type with this name has this field
                 }
                 // TODO: check that all fields initialized
-                Ty::Named(name)
+                self.memoize_ty(&Ty::Named(name))
             }
             Expr::Call { func, args } => {
                 if let Some(var) = self.resolve_var(func, envs, func_subscope_depth) {
-                    let (arg_tys, return_ty) =
-                        if let Ty::Func { arg_tys, return_ty } = var.entry.get() {
-                            (arg_tys.clone(), (**return_ty).clone())
-                        } else if self.typed {
-                            self.error(
-                                format!("Compile Error: Function call must have Func type!"),
-                                expr.span,
-                            )
-                        } else {
-                            (Vec::new(), Ty::Unknown)
-                        };
+                    let (arg_tys, return_ty) = if let Ty::Func { arg_tys, return_ty } =
+                        self.realize_ty(*var.entry.get())
+                    {
+                        let arg_tys = arg_tys.clone();
+                        let return_ty = return_ty.clone();
+                        (
+                            arg_tys.iter().map(|ty| self.memoize_ty(ty)).collect(),
+                            self.memoize_ty(&return_ty),
+                        )
+                    } else if self.typed {
+                        self.error(
+                            format!("Compile Error: Function call must have Func type!"),
+                            expr.span,
+                        )
+                    } else {
+                        (Vec::new(), self.memoize_ty(&Ty::Unknown))
+                    };
 
                     if !var.is_local {
                         captures.insert(func);
@@ -1145,9 +1175,12 @@ impl<'p> Program<'p> {
 
                     for (idx, arg) in args.iter().enumerate() {
                         let expr_ty = self.check_expr(arg, envs, captures, func_subscope_depth);
-                        let expected_ty = arg_tys.get(idx).unwrap_or(&Ty::Unknown);
+                        let expected_ty = arg_tys
+                            .get(idx)
+                            .copied()
+                            .unwrap_or(self.memoize_ty(&Ty::Unknown));
 
-                        self.check_ty(&expr_ty, &expected_ty, "arg", arg.span);
+                        self.check_ty(expr_ty, expected_ty, "arg", arg.span);
                     }
                     return return_ty;
                 } else {
@@ -1176,17 +1209,50 @@ impl<'p> Program<'p> {
         None
     }
 
-    #[track_caller]
-    fn check_ty(&mut self, computed_ty: &Ty<'p>, expected_ty: &Ty<'p>, env_name: &str, span: Span) {
-        if self.typed && computed_ty != expected_ty {
-            self.error(
-                format!(
-                    "Compile Error: {} type mismatch (expected {:?}, got {:?})",
-                    env_name, expected_ty, computed_ty
-                ),
-                span,
-            )
+    fn resolve_ty(
+        &mut self,
+        ty_name: &'p str,
+        envs: &mut Vec<CheckEnv<'p>>,
+        _func_subscope_depth: &mut usize,
+    ) -> Option<TyIdx> {
+        for (_depth, env) in envs.iter_mut().rev().enumerate() {
+            if let Some(idx) = env.tys.get(ty_name) {
+                return Some(*idx);
+            }
         }
+        None
+    }
+
+    #[track_caller]
+    fn check_ty(&mut self, computed_ty: TyIdx, expected_ty: TyIdx, env_name: &str, span: Span) {
+        if self.typed && computed_ty != expected_ty {
+            let msg = format!(
+                "Compile Error: {} type mismatch (expected {:?}, got {:?})",
+                env_name,
+                self.realize_ty(expected_ty),
+                self.realize_ty(computed_ty),
+            );
+            self.error(msg, span)
+        }
+    }
+
+    fn memoize_ty(&mut self, ty: &Ty<'p>) -> TyIdx {
+        if let Some(idx) = self.ty_map.get(ty) {
+            *idx
+        } else {
+            let ty1 = ty.clone();
+            let ty2 = ty.clone();
+            let idx = self.tys.len();
+            self.ty_map.insert(ty1, idx);
+            self.tys.push(ty2);
+            idx
+        }
+    }
+
+    fn realize_ty(&self, ty: TyIdx) -> &Ty<'p> {
+        self.tys
+            .get(ty)
+            .expect("Internal Compile Error: invalid TyIdx")
     }
 }
 

@@ -35,13 +35,17 @@ use nom::{
 //
 
 const MAIN_PROGRAM: &str = r#"
-    fn square(x: Int) -> Int {
-        ret mul(x, x)
+    let factor: Int = 3
+    fn get_factor() -> Int {
+        ret factor
+    }
+    fn multi(factory: fn() -> Int, x: Int) -> Int {
+        ret mul(x, factory())
     }
 
     let x: Int = 7
 
-    ret square(x)
+    ret multi(get_factor, x)
 "#;
 
 fn main() {
@@ -575,11 +579,21 @@ fn ty_decl_empty(i: &str) -> IResult<&str, Ty> {
     map(tag("()"), |_| Ty::Empty)(i)
 }
 fn ty_decl_func(i: &str) -> IResult<&str, Ty> {
-    // TODO
-    map(tag("fn"), |_| Ty::Func {
-        arg_tys: Vec::new(),
-        return_ty: Box::new(Ty::Unknown),
-    })(i)
+    let (i, _) = tag("fn")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("(")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, arg_tys) = separated_list0(char(','), padded(ty_decl))(i)?;
+    let (i, _) = tag(")")(i)?;
+    let (i, return_ty) = return_ty(i)?;
+
+    Ok((
+        i,
+        Ty::Func {
+            arg_tys,
+            return_ty: Box::new(return_ty),
+        },
+    ))
 }
 
 pub fn padded<F, T, O, E>(mut parser: F) -> impl FnMut(T) -> IResult<T, O, E>
@@ -749,7 +763,7 @@ impl<'p> Program<'p> {
                         );
                     }
                 }
-                Stmt::Ret { expr } | Stmt::Print { expr } => {
+                Stmt::Ret { expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures);
 
                     if self.typed {
@@ -760,6 +774,10 @@ impl<'p> Program<'p> {
                             expr_ty
                         );
                     }
+                }
+                Stmt::Print { expr } => {
+                    let _expr_ty = self.check_expr(expr, envs, captures);
+                    // Print takes any value, it's magic!
                 }
                 Stmt::Break | Stmt::Continue => {
                     // Nothing to analyze
@@ -2324,16 +2342,33 @@ mod test_typed {
     }
 
     #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_capture_ty() {
+        let program = r#"
+            let factor: Bool = true
+            fn multi(x: Int) -> Int {
+                ret mul(x, factor)
+            }
+
+            let x: Int = 7
+
+            ret multi(x)
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
     fn test_basic() {
         // Just tests basic functionality.
         //
         // Whitespace is wonky to make sure the parser is pemissive of that.
         let program = r#"
-            fn square(x: Int) -> Int {
+            fn square(x:Int)->Int{
                 ret mul(x, x)
             }
 
-            let x: Int = 6
+            let x:Int=6
             let cond: Bool = true
 
             if cond {
@@ -2346,5 +2381,156 @@ mod test_typed {
 
         let (result, _output) = run_typed(program);
         assert_eq!(result, 49);
+    }
+
+    #[test]
+    fn test_nested_closure_capture() {
+        let program = r#"
+            let factor: Int = 3
+            fn get_factor() -> Int {
+                ret factor
+            }
+            fn multi(x: Int) -> Int {
+                ret mul(x, get_factor())
+            }
+
+            let x: Int = 7
+
+            ret multi(x)      
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 21);
+    }
+
+    #[test]
+    fn test_fn_tys() {
+        let program = r#"
+            let factor: Int = 3
+            fn get_factor() -> Int {
+                ret factor
+            }
+            fn multi(factory: fn() -> Int, x: Int) -> Int {
+                ret mul(x, factory())
+            }
+
+            let x: Int = 7
+
+            print multi(get_factor, x)  
+
+
+            fn mega_multi(multiplier: fn(fn() -> Int, Int) -> Int) -> Int {
+                fn eleven() -> Int {
+                    ret 11
+                }
+                print multiplier(eleven, 9)
+                ret 0
+            }
+
+            let _: Int = mega_multi(multi)
+
+            ret 0
+        "#;
+
+        let (result, output) = run_typed(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"21
+99
+"#
+        )
+    }
+
+    #[test]
+    fn test_empty_ty() {
+        // Just tests basic functionality.
+        //
+        // Whitespace is wonky to make sure the parser is pemissive of that.
+        let program = r#"
+            let x: () = ()
+            set x = ()
+            let y: () = x
+
+            fn f1() -> () {
+                ret ()
+            }
+            fn f2(x: ()) -> () {
+                ret x
+            }
+            fn f3(x: (), y: ()) -> () {
+                ret y
+            }
+            fn f4(x: fn() -> ()) -> () {
+                ret x()
+            }
+            fn f5(x: fn(()) -> ()) -> () {
+                ret x(())
+            }
+            fn f6(x: fn(fn() -> ()) -> ()) -> () {
+                ret x(f1)
+            }
+            fn f7(x: fn(fn(()) -> ()) -> ()) -> () {
+                ret x(f2)
+            }
+            fn f8(x: fn(fn((), ()) -> ()) -> (), y: ()) -> () {
+                ret x(f3)
+            }
+            
+            let a: () = f1()
+            let b: () = f2(())
+            let c: () = f3((), ())
+            let d: () = f4(f1)
+            let e: () = f5(f2)
+            let f: () = f6(f4)
+            let g: () = f7(f5)
+            let h: fn(fn(fn((), ()) -> ()) -> (), ()) -> () = f8
+
+            ret 0           
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_weird_print_ty() {
+        // Regression test for that time I accidentally had `print`
+        // check that its input was the return type of the parent function.
+        let program = r#"
+            let factor: Int = 3
+            fn get_factor() -> Int {
+                ret factor
+            }
+            fn multi(factory: fn() -> Int, x: Int) -> Int {
+                ret mul(x, factory())
+            }
+
+            let x: Int = 7
+
+            print multi(get_factor, x)  
+
+
+            fn mega_multi(multiplier: fn(fn() -> Int, Int) -> Int) -> () {
+                fn eleven() -> Int {
+                    ret 11
+                }
+                print multiplier(eleven, 9)
+                ret ()
+            }
+
+            let _: () = mega_multi(multi)
+
+            ret 0
+        "#;
+
+        let (result, output) = run_typed(program);
+        assert_eq!(result, 0);
+        assert_eq!(
+            output.unwrap(),
+            r#"21
+99
+"#
+        )
     }
 }

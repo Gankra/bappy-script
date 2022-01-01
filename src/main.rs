@@ -43,7 +43,7 @@ const MAIN_PROGRAM: &str = r#"
         ret mul(x, factory())
     }
 
-    let x: Int = 0
+    let x: Int = 7
 
     ret multi(get_factor, x)
 "#;
@@ -796,6 +796,17 @@ impl<'p> Program<'p> {
         let mut envs = vec![CheckEnv { vars: builtins }];
         let mut main = self.main.take().unwrap();
         self.check_func(&mut main, &mut envs);
+
+        if envs.len() != 1 {
+            self.error(
+                format!("Internal Compile Error: scopes were improperly popped"),
+                Span {
+                    start: addr(self.input),
+                    end: addr(self.input),
+                },
+            );
+        }
+
         self.main = Some(main);
     }
 
@@ -806,6 +817,12 @@ impl<'p> Program<'p> {
             .map(|decl| (decl.ident, decl.ty.clone()))
             .collect();
         envs.push(CheckEnv { vars });
+
+        // func_subscope_depth helps us keep track of how many scopes we are nested
+        // in *within* the body of this function. This is important because if we
+        // access values that are *deeper* than that number of scopes, then we're
+        // accessing captured variables (which should be added to `captures`).
+        let mut func_subscope_depth = 0;
         let mut captures = HashSet::new();
 
         let return_ty = if let Ty::Func { return_ty, .. } = &func.ty {
@@ -814,7 +831,13 @@ impl<'p> Program<'p> {
             &Ty::Unknown
         };
 
-        self.check_block(&mut func.stmts, envs, &mut captures, return_ty);
+        self.check_block(
+            &mut func.stmts,
+            envs,
+            &mut captures,
+            return_ty,
+            &mut func_subscope_depth,
+        );
 
         func.captures = captures;
         envs.pop();
@@ -826,7 +849,12 @@ impl<'p> Program<'p> {
         envs: &mut Vec<CheckEnv<'p>>,
         captures: &mut HashSet<&'p str>,
         return_ty: &Ty,
+        func_subscope_depth: &mut usize,
     ) {
+        *func_subscope_depth += 1;
+        envs.push(CheckEnv {
+            vars: HashMap::new(),
+        });
         for Statement { code: stmt, .. } in stmts {
             match stmt {
                 Stmt::If {
@@ -834,7 +862,7 @@ impl<'p> Program<'p> {
                     stmts,
                     else_stmts,
                 } => {
-                    let expr_ty = self.check_expr(expr, envs, captures);
+                    let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
                     let expected_ty = Ty::Bool;
                     if self.typed && expr_ty != expected_ty {
                         self.error(
@@ -846,11 +874,11 @@ impl<'p> Program<'p> {
                         );
                     }
 
-                    self.check_block(stmts, envs, captures, return_ty);
-                    self.check_block(else_stmts, envs, captures, return_ty);
+                    self.check_block(stmts, envs, captures, return_ty, func_subscope_depth);
+                    self.check_block(else_stmts, envs, captures, return_ty, func_subscope_depth);
                 }
                 Stmt::Loop { stmts } => {
-                    self.check_block(stmts, envs, captures, return_ty);
+                    self.check_block(stmts, envs, captures, return_ty, func_subscope_depth);
                 }
                 Stmt::Func { func } => {
                     // We push a func's name after checking it to avoid
@@ -863,7 +891,7 @@ impl<'p> Program<'p> {
                         .insert(func.name, func.ty.clone());
                 }
                 Stmt::Let { name, expr } => {
-                    let expr_ty = self.check_expr(expr, envs, captures);
+                    let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
                     let expected_ty = &name.ty;
 
                     if self.typed && &expr_ty != expected_ty {
@@ -879,21 +907,34 @@ impl<'p> Program<'p> {
                     envs.last_mut().unwrap().vars.insert(name.ident, expr_ty);
                 }
                 Stmt::Set { name, expr } => {
-                    let expr_ty = self.check_expr(expr, envs, captures);
+                    let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
 
-                    if let Some(expected_ty) = envs.last().unwrap().vars.get(name) {
-                        if self.typed && &expr_ty != expected_ty {
-                            self.error(
-                                format!(
-                                    "Compile Error: `set` type mismatch (expected {:?}, got {:?})",
-                                    expected_ty, expr_ty
-                                ),
-                                expr.span,
-                            )
+                    let mut found = false;
+                    for (depth, env) in envs.iter_mut().rev().enumerate() {
+                        if let Some(expected_ty) = env.vars.get(name) {
+                            if depth <= *func_subscope_depth {
+                                if self.typed && &expr_ty != expected_ty {
+                                    self.error(
+                                        format!(
+                                            "Compile Error: `set` type mismatch (expected {:?}, got {:?})",
+                                            expected_ty, expr_ty
+                                        ),
+                                        expr.span,
+                                    )
+                                }
+                                found = true;
+                                env.vars.insert(name, expr_ty).unwrap();
+                                break;
+                            } else {
+                                self.error(
+                                    format!("Compile Error: Trying to `set` captured variable {} (captures are by-value!)", name),
+                                    expr.span,
+                                )
+                            }
                         }
+                    }
 
-                        envs.last_mut().unwrap().vars.insert(name, expr_ty);
-                    } else {
+                    if !found {
                         self.error(
                             format!("Compile Error: Trying to `set` undefined variable {}", name),
                             expr.span,
@@ -901,7 +942,7 @@ impl<'p> Program<'p> {
                     }
                 }
                 Stmt::Ret { expr } => {
-                    let expr_ty = self.check_expr(expr, envs, captures);
+                    let expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
                     let expected_ty = return_ty;
 
                     if self.typed && &expr_ty != expected_ty {
@@ -915,7 +956,7 @@ impl<'p> Program<'p> {
                     }
                 }
                 Stmt::Print { expr } => {
-                    let _expr_ty = self.check_expr(expr, envs, captures);
+                    let _expr_ty = self.check_expr(expr, envs, captures, func_subscope_depth);
                     // Print takes any value, it's magic!
                 }
                 Stmt::Break | Stmt::Continue => {
@@ -923,6 +964,9 @@ impl<'p> Program<'p> {
                 }
             }
         }
+
+        *func_subscope_depth -= 1;
+        envs.pop();
     }
 
     fn check_expr(
@@ -930,6 +974,7 @@ impl<'p> Program<'p> {
         expr: &Expression<'p>,
         envs: &mut Vec<CheckEnv<'p>>,
         captures: &mut HashSet<&'p str>,
+        func_subscope_depth: &mut usize,
     ) -> Ty {
         match &expr.code {
             Expr::Lit(lit) => {
@@ -938,7 +983,7 @@ impl<'p> Program<'p> {
             Expr::Var(var_name) => {
                 for (depth, env) in envs.iter().rev().enumerate() {
                     if let Some(ty) = env.vars.get(var_name) {
-                        if depth == 0 {
+                        if depth <= *func_subscope_depth {
                             // Do nothing, not a capture
                         } else {
                             captures.insert(var_name);
@@ -966,7 +1011,7 @@ impl<'p> Program<'p> {
                             (Vec::new(), Ty::Unknown)
                         };
 
-                        if depth == 0 {
+                        if depth <= *func_subscope_depth {
                             // Do nothing, not a capture
                         } else {
                             captures.insert(func);
@@ -984,7 +1029,8 @@ impl<'p> Program<'p> {
                         }
 
                         for (idx, arg_expr) in args.iter().enumerate() {
-                            let expr_ty = self.check_expr(arg_expr, envs, captures);
+                            let expr_ty =
+                                self.check_expr(arg_expr, envs, captures, func_subscope_depth);
                             let expected_ty = arg_tys.get(idx).unwrap_or(&Ty::Unknown);
 
                             if self.typed && &expr_ty != expected_ty {
@@ -1223,6 +1269,16 @@ impl<'p> Program<'p> {
         let mut envs = vec![Env { vals: builtins }];
         let out = self.eval_func(&main, Vec::new(), HashMap::new(), &mut envs);
 
+        if envs.len() != 1 {
+            self.error(
+                format!(
+                    "Runtime Error: not all scopes were properly popped at end of execution! (extra scopes: {})",
+                    envs.len() - 1,
+                ),
+                self.cur_eval_span,
+            )
+        }
+
         if let Val::Int(int) = out {
             self.main = Some(main);
             int
@@ -1298,6 +1354,9 @@ impl<'p> Program<'p> {
         stmts: &'e [Statement<'p>],
         envs: &mut Vec<Env<'e, 'p>>,
     ) -> ControlFlow<'e, 'p> {
+        envs.push(Env {
+            vals: HashMap::new(),
+        });
         for Statement {
             code: stmt,
             span: stmt_span,
@@ -1311,9 +1370,17 @@ impl<'p> Program<'p> {
                 }
                 Stmt::Set { name, expr } => {
                     let val = self.eval_expr(expr, envs);
-                    let old = envs.last_mut().unwrap().vals.insert(*name, val);
 
-                    if old.is_none() {
+                    let mut found = false;
+                    for env in envs.iter_mut().rev() {
+                        if let Some(_) = env.vals.get(name) {
+                            found = true;
+                            env.vals.insert(*name, val).unwrap();
+                            break;
+                        }
+                    }
+
+                    if !found {
                         self.error(
                             format!(
                                 "Runtime Error: Tried to set an undefined local variable {}",
@@ -1355,14 +1422,20 @@ impl<'p> Program<'p> {
                     match result {
                         ControlFlow::None => { /* do nothing */ }
                         // All other control flow ends the block immediately
-                        flow => return flow,
+                        flow => {
+                            envs.pop();
+                            return flow;
+                        }
                     }
                 }
                 Stmt::Loop { stmts } => {
                     loop {
                         let result = self.eval_block(stmts, envs);
                         match result {
-                            ControlFlow::Return(val) => return ControlFlow::Return(val),
+                            ControlFlow::Return(val) => {
+                                envs.pop();
+                                return ControlFlow::Return(val);
+                            }
                             ControlFlow::Break => break,
                             ControlFlow::Continue => continue,
                             ControlFlow::None => { /* do nothing */ }
@@ -1375,17 +1448,21 @@ impl<'p> Program<'p> {
                 }
                 Stmt::Ret { expr } => {
                     let val = self.eval_expr(expr, envs);
+                    envs.pop();
                     return ControlFlow::Return(val);
                 }
                 Stmt::Break => {
+                    envs.pop();
                     return ControlFlow::Break;
                 }
                 Stmt::Continue => {
+                    envs.pop();
                     return ControlFlow::Continue;
                 }
             }
         }
 
+        envs.pop();
         // Nothing special happened, continue execution
         ControlFlow::None
     }
@@ -2443,6 +2520,40 @@ mod test_typed {
 
     #[test]
     #[should_panic(expected = "Compile Error")]
+    fn compile_fail_scoping_1() {
+        let program = r#"
+            if false {
+                let factor: Int = 3
+            }
+            fn do_thing() -> Int {
+                ret factor
+            }
+            ret do_thing()
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_scoping_2() {
+        let program = r#"
+            if true {
+                let factor: Int = 3
+            }
+            fn do_thing() -> Int {
+                ret factor
+            }
+            ret do_thing()
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
     fn compile_fail_builtin_ty() {
         let program = r#"
             ret mul(true, true)
@@ -2645,9 +2756,6 @@ mod test_typed {
 
     #[test]
     fn test_empty_ty() {
-        // Just tests basic functionality.
-        //
-        // Whitespace is wonky to make sure the parser is pemissive of that.
         let program = r#"
             let x: () = ()
             set x = ()

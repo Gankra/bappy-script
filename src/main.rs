@@ -39,9 +39,9 @@ const MAIN_PROGRAM: &str = r#"
         ret mul(x, x)
     }
 
-    let x: Int = 0
+    let x: Int = 7
 
-    ret x
+    ret square(x)
 "#;
 
 fn main() {
@@ -525,7 +525,10 @@ fn lit_empty(i: &str) -> IResult<&str, Literal> {
 fn var_decl(i: &str) -> IResult<&str, VarDecl> {
     alt((
         typed_ident,
-        map(ident, |id| VarDecl { ident: id, ty: Ty::Unknown } ),
+        map(ident, |id| VarDecl {
+            ident: id,
+            ty: Ty::Unknown,
+        }),
     ))(i)
 }
 
@@ -623,7 +626,7 @@ enum Ty {
     Str,
     Bool,
     Empty,
-    Func { 
+    Func {
         arg_tys: Vec<Ty>,
         return_ty: Box<Ty>,
     },
@@ -649,11 +652,21 @@ impl<'p> Program<'p> {
     }
 
     fn check_func(&mut self, func: &mut Function<'p>, envs: &mut Vec<CheckEnv<'p>>) {
-        let vars = func.args.iter().map(|decl| (decl.ident, decl.ty.clone())).collect();
+        let vars = func
+            .args
+            .iter()
+            .map(|decl| (decl.ident, decl.ty.clone()))
+            .collect();
         envs.push(CheckEnv { vars });
         let mut captures = HashSet::new();
 
-        self.check_block(&mut func.stmts, envs, &mut captures);
+        let return_ty = if let Ty::Func { return_ty, .. } = &func.ty {
+            &*return_ty
+        } else {
+            &Ty::Unknown
+        };
+
+        self.check_block(&mut func.stmts, envs, &mut captures, return_ty);
 
         func.captures = captures;
         envs.pop();
@@ -664,6 +677,7 @@ impl<'p> Program<'p> {
         stmts: &mut [Stmt<'p>],
         envs: &mut Vec<CheckEnv<'p>>,
         captures: &mut HashSet<&'p str>,
+        return_ty: &Ty,
     ) {
         for stmt in stmts {
             match stmt {
@@ -672,36 +686,80 @@ impl<'p> Program<'p> {
                     stmts,
                     else_stmts,
                 } => {
-                    let cond_ty = self.check_expr(expr, envs, captures);
-                    self.check_block(stmts, envs, captures);
-                    self.check_block(else_stmts, envs, captures);
+                    let expr_ty = self.check_expr(expr, envs, captures);
+
+                    if self.typed {
+                        assert!(
+                            &expr_ty == &Ty::Bool,
+                            "Compile Error: If type mismatch (expected {:?}, got {:?})",
+                            Ty::Bool,
+                            expr_ty
+                        );
+                    }
+
+                    self.check_block(stmts, envs, captures, return_ty);
+                    self.check_block(else_stmts, envs, captures, return_ty);
                 }
                 Stmt::Loop { stmts } => {
-                    self.check_block(stmts, envs, captures);
+                    self.check_block(stmts, envs, captures, return_ty);
                 }
                 Stmt::Func { func } => {
                     // We push a func's name after checking it to avoid
                     // infinite capture recursion. This means naive recursion
                     // is illegal.
                     self.check_func(func, envs);
-                    envs.last_mut().unwrap().vars.insert(func.name, func.ty.clone());
+                    envs.last_mut()
+                        .unwrap()
+                        .vars
+                        .insert(func.name, func.ty.clone());
                 }
                 Stmt::Let { name, expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures);
                     let decl_ty = &name.ty;
+
+                    if self.typed {
+                        assert!(
+                            &expr_ty == decl_ty,
+                            "Compile Error: Let type mismatch (expected {:?}, got {:?})",
+                            decl_ty,
+                            expr_ty
+                        );
+                    }
+
                     envs.last_mut().unwrap().vars.insert(name.ident, expr_ty);
                 }
                 Stmt::Set { name, expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures);
-                    let old = envs.last_mut().unwrap().vars.insert(name, expr_ty);
-                    assert!(
-                        old.is_some(),
-                        "Compile Error: trying to set an undefined local variable {}",
-                        name
-                    );
+
+                    if let Some(old_ty) = envs.last().unwrap().vars.get(name) {
+                        if self.typed {
+                            assert!(
+                                &expr_ty == old_ty,
+                                "Compile Error: Set type mismatch (expected {:?}, got {:?})",
+                                old_ty,
+                                expr_ty
+                            );
+                        }
+
+                        envs.last_mut().unwrap().vars.insert(name, expr_ty);
+                    } else {
+                        panic!(
+                            "Compile Error: trying to set an undefined local variable {}",
+                            name
+                        );
+                    }
                 }
                 Stmt::Ret { expr } | Stmt::Print { expr } => {
                     let expr_ty = self.check_expr(expr, envs, captures);
+
+                    if self.typed {
+                        assert!(
+                            &expr_ty == return_ty,
+                            "Compile Error: Return type mismatch (expected {:?}, got {:?})",
+                            return_ty,
+                            expr_ty
+                        );
+                    }
                 }
                 Stmt::Break | Stmt::Continue => {
                     // Nothing to analyze
@@ -712,9 +770,9 @@ impl<'p> Program<'p> {
 
     fn check_expr(
         &mut self,
-        expr: &Expr<'p>, 
-        envs: &mut Vec<CheckEnv<'p>>, 
-        captures: &mut HashSet<&'p str>, 
+        expr: &Expr<'p>,
+        envs: &mut Vec<CheckEnv<'p>>,
+        captures: &mut HashSet<&'p str>,
     ) -> Ty {
         match expr {
             Expr::Lit(lit) => {
@@ -736,10 +794,11 @@ impl<'p> Program<'p> {
             Expr::Call { func, args } => {
                 for (depth, env) in envs.iter().rev().enumerate() {
                     if let Some(func_ty) = env.vars.get(func) {
-                        let (arg_tys, return_ty) = if let Ty::Func { arg_tys, return_ty } = func_ty {
+                        let (arg_tys, return_ty) = if let Ty::Func { arg_tys, return_ty } = func_ty
+                        {
                             (arg_tys.clone(), (**return_ty).clone())
                         } else if self.typed {
-                            panic!("Compile Error: Function must have Func type!");
+                            panic!("Compile Error: Function call must have Func type!");
                         } else {
                             (Vec::new(), Ty::Unknown)
                         };
@@ -749,10 +808,15 @@ impl<'p> Program<'p> {
                         } else {
                             captures.insert(func);
                         }
-                        for expr in args {
-                            self.check_expr(expr, envs, captures);
+
+                        for (idx, expr) in args.iter().enumerate() {
+                            let expr_ty = self.check_expr(expr, envs, captures);
+                            if self.typed {
+                                let arg_ty = &arg_tys[idx];
+                                assert!(&expr_ty == arg_ty, "Compile Error: Argument type mismatch (expected {:?}, got {:?})", arg_ty, expr_ty);
+                            }
                         }
-                        return return_ty
+                        return return_ty;
                     }
                 }
                 panic!("Compile Error: Call of undefined function {}", func);
@@ -929,6 +993,7 @@ enum Val<'e, 'p> {
     Builtin(Builtin),
 }
 
+/*
 impl Val<'_, '_> {
     fn ty(&self) -> &Ty {
         match self {
@@ -941,6 +1006,7 @@ impl Val<'_, '_> {
         }
     }
 }
+*/
 
 #[derive(Debug, Clone)]
 struct Closure<'e, 'p> {
@@ -2125,5 +2191,160 @@ loop!
 71
 "#
         );
+    }
+}
+
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+
+#[cfg(test)]
+mod test_typed {
+    use super::run_typed;
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_builtin_ty() {
+        let program = r#"
+            ret mul(true, true)
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_arg_ty() {
+        let program = r#"
+            fn square(x: Int) -> Int {
+                ret mul(x, x)
+            }
+
+            let x: Bool = true
+            ret square(x)   
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_arg_ty_complex() {
+        let program = r#"
+            fn square(x: Int) -> Int {
+                ret mul(x, x)
+            }
+
+            let x: Int = 3
+            ret square(eq(square(square(square(x)))), 0))   
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_cond_ty() {
+        let program = r#"
+            let x: Int = 0
+            if x {
+                ret -1
+            }
+            ret 2
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_let_ty() {
+        let program = r#"
+            let x: Int = true
+            ret 0
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_set_ty() {
+        let program = r#"
+            let x: Int = 0
+            set x = ()
+            ret 0
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_ret_main_ty() {
+        let program = r#"
+            let x: Bool = true
+            ret x
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    #[should_panic(expected = "Compile Error")]
+    fn compile_fail_ret_ty() {
+        let program = r#"
+            fn f() -> Int {
+                ret true
+            }
+            ret f()
+        "#;
+
+        let (_result, _output) = run_typed(program);
+    }
+
+    #[test]
+    fn test_basic() {
+        // Just tests basic functionality.
+        //
+        // Whitespace is wonky to make sure the parser is pemissive of that.
+        let program = r#"
+            fn square(x: Int) -> Int {
+                ret mul(x, x)
+            }
+
+            let x: Int = 6
+            let cond: Bool = true
+
+            if cond {
+                set x = 7
+            }
+
+            let y: Int = square(4)
+            ret square(x)            
+        "#;
+
+        let (result, _output) = run_typed(program);
+        assert_eq!(result, 49);
     }
 }

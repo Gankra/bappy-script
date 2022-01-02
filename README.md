@@ -112,6 +112,15 @@ has the worst errors and no recovery because I just didn't care about it.
 Syntax is largely based on Rust's because it's a fairly clean and unambiguous syntax I'm
 comfortable with. 
 
+> *Why didn't you make it a lisp variant if you hate parsing?*
+>
+> I am really bad at reading/writing lispy things so this felt like a good tradeoff
+> in personal effort and comfort. It's also easier for me to intuit how something "should"
+> work when it looks like Rust code, because that's the language I understand the best.
+>
+> Also if I tell something that it's Rust code, the syntax highlighting basically just works lol
+
+
 Notable deviations:
 
 Newlines are very significant. It sucks, but most of the time you don't really notice.

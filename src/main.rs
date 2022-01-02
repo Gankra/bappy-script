@@ -38,29 +38,27 @@ mod tests;
 //
 
 const MAIN_PROGRAM: &str = r#"
-    struct SuperPoint {
-        x: (Int, Str)
-        y: Bool
+    fn temp () -> fn () -> Int {
+        fn inner_temp() -> Int {
+            ret 2
+        }
+        ret inner_temp
     }
+    let func: fn() -> fn () -> Int = temp
 
-    let sup = ((SuperPoint { x: (65, "what"), y: false }, 2), 7, ("hello", "there"))
-    print sup
-    print sup.0.0.x
-    print sup.0.0.x.1
-    print sup.2.1
-
-    set sup.1 = 5
-    print sup
-    set sup.0.1 = 3
-    print sup
-    set sup.2.0 = "bye"
-    print sup
-    set sup.0.0.x.1 = "wow!"
-    print sup
-    set sup.0.0.x.0 = add(sup.0.0.x.0, 4)
-    print sup
-
-    ret sup.0.0.x.0
+    if true {
+        let capture = 7
+        fn outer_capturer() -> fn () -> Int {
+            fn inner_capturer() -> Int {
+                print capture
+                ret capture
+            }
+            ret inner_capturer
+        }
+        set func = outer_capturer
+    }
+    let sub_func = func()
+    ret sub_func()
 "#;
 
 fn main() {
@@ -71,8 +69,6 @@ fn main() {
 struct Program<'p> {
     /// Should we use static types?
     typed: bool,
-    /// Should we try to generated more optimized execution?
-    compiled: bool,
 
     /// The input we're parsing/checking/executing    
     input: &'p str,
@@ -107,7 +103,6 @@ impl<'p> Program<'p> {
     fn new(input: &'p str) -> Self {
         Self {
             typed: false,
-            compiled: false,
             input,
             input_lines: Vec::new(),
             main: None,
@@ -1069,23 +1064,25 @@ struct CheckEnv<'p> {
     is_function_root: bool,
 }
 struct CheckEntry<'a, 'p> {
-    is_local: bool,
+    capture_depth: usize,
     entry: std::collections::hash_map::OccupiedEntry<'a, &'p str, TyIdx>,
 }
 
 impl<'p> TyCtx<'p> {
     fn resolve_var<'a>(&'a mut self, var_name: &'p str) -> Option<CheckEntry<'a, 'p>> {
         // By default we're accessing locals
-        let mut is_local = true;
+        let mut capture_depth = 0;
         use std::collections::hash_map::Entry;
         for env in self.envs.iter_mut().rev() {
             if let Entry::Occupied(entry) = env.vars.entry(var_name) {
-                return Some(CheckEntry { is_local, entry });
+                return Some(CheckEntry { capture_depth, entry });
             }
             if env.is_function_root {
                 // We're walking over a function root, so we're now
-                // accessing captures.
-                is_local = false;
+                // accessing captures. We track this with an integer
+                // because if we capture multiple functions deep, our
+                // ancestor functions also need to capture that value.
+                capture_depth += 1;
             }
         }
         None
@@ -1272,9 +1269,10 @@ impl<'p> Program<'p> {
             is_function_root: false,
         };
         ctx.envs.push(globals);
+        let mut captures = Vec::new();
 
         let mut main = self.main.take().unwrap();
-        self.check_func(&mut main, &mut ctx);
+        self.check_func(&mut main, &mut ctx, &mut captures);
 
         if ctx.envs.len() != 1 {
             self.error(
@@ -1289,7 +1287,7 @@ impl<'p> Program<'p> {
         self.main = Some(main);
     }
 
-    fn check_func(&mut self, func: &mut Function<'p>, ctx: &mut TyCtx<'p>) {
+    fn check_func(&mut self, func: &mut Function<'p>, ctx: &mut TyCtx<'p>, captures: &mut Vec<HashSet<&'p str>>) {
         let vars = func
             .args
             .iter()
@@ -1312,7 +1310,7 @@ impl<'p> Program<'p> {
             is_function_root: true,
         });
 
-        let mut captures = HashSet::new();
+        captures.push(HashSet::new());
 
         let return_ty = if let TyName::Func { return_ty, .. } = &func.ty {
             return_ty
@@ -1330,9 +1328,9 @@ impl<'p> Program<'p> {
             return_ty = ctx.ty_empty;
         }
 
-        self.check_block(&mut func.stmts, ctx, &mut captures, return_ty);
+        self.check_block(&mut func.stmts, ctx, captures, return_ty);
 
-        func.captures = captures;
+        func.captures = captures.pop().unwrap();
         ctx.envs.pop();
     }
 
@@ -1340,7 +1338,7 @@ impl<'p> Program<'p> {
         &mut self,
         stmts: &mut [Statement<'p>],
         ctx: &mut TyCtx<'p>,
-        captures: &mut HashSet<&'p str>,
+        captures: &mut Vec<HashSet<&'p str>>,
         return_ty: TyIdx,
     ) {
         ctx.envs.push(CheckEnv {
@@ -1376,7 +1374,7 @@ impl<'p> Program<'p> {
                     // We push a func's name after checking it to avoid
                     // infinite capture recursion. This means naive recursion
                     // is illegal.
-                    self.check_func(func, ctx);
+                    self.check_func(func, ctx, captures);
                     let func_ty = ctx.memoize_ty(self, &func.ty);
                     ctx.envs.last_mut().unwrap().vars.insert(func.name, func_ty);
                 }
@@ -1403,7 +1401,7 @@ impl<'p> Program<'p> {
                 } => {
                     let expr_ty = self.check_expr(expr, ctx, captures);
                     if let Some(var) = ctx.resolve_var(var_path.ident) {
-                        if var.is_local {
+                        if var.capture_depth == 0 {
                             let var_ty = *var.entry.get();
                             let expected_ty =
                                 self.resolve_var_path(ctx, var_ty, &var_path.fields, *stmt_span);
@@ -1445,7 +1443,7 @@ impl<'p> Program<'p> {
         &mut self,
         expr: &Expression<'p>,
         ctx: &mut TyCtx<'p>,
-        captures: &mut HashSet<&'p str>,
+        captures: &mut Vec<HashSet<&'p str>>,
     ) -> TyIdx {
         match &expr.code {
             Expr::Lit(lit) => {
@@ -1453,7 +1451,7 @@ impl<'p> Program<'p> {
             }
             Expr::VarPath(var_path) => {
                 if let Some(var) = ctx.resolve_var(var_path.ident) {
-                    if !var.is_local {
+                    for (captures, _) in captures.iter_mut().rev().zip(0..var.capture_depth) {
                         captures.insert(var_path.ident);
                     }
                     let var_ty = *var.entry.get();
@@ -1527,7 +1525,7 @@ impl<'p> Program<'p> {
             }
             Expr::Call { func, args } => {
                 if let Some(var) = ctx.resolve_var(func) {
-                    if !var.is_local {
+                    for (captures, _) in captures.iter_mut().rev().zip(0..var.capture_depth) {
                         captures.insert(func);
                     }
 

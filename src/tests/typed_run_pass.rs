@@ -608,3 +608,41 @@ there
 "#
     )
 }
+
+#[test]
+fn test_nested_capture() {
+    // If an inner closure captures some state outside of their parent,
+    // then the parent must also capture that state.
+    let program = r#"
+        fn temp () -> fn () -> Int {
+            fn inner_temp() -> Int {
+                ret 2
+            }
+            ret inner_temp
+        }
+        let func: fn() -> fn () -> Int = temp
+
+        if true {
+            let capture = 7
+            fn outer_capturer() -> fn () -> Int {
+                fn inner_capturer() -> Int {
+                    print capture
+                    ret capture
+                }
+                ret inner_capturer
+            }
+            set func = outer_capturer
+        }
+        let sub_func = func()
+        ret sub_func()
+    "#;
+
+    let (result, output) = run_typed(program);
+    assert_eq!(result, 7);
+    assert_eq!(
+        output.unwrap(),
+        r#"7
+"#
+    )
+}
+

@@ -424,7 +424,7 @@ impl<'p> Program<'p> {
 
                     if !matches!(terminal, Item::End) {
                         self.error(
-                            format!("Parse Error: `fn` ending eith an `else`"),
+                            format!("Parse Error: `fn` ending with an `else`"),
                             Span {
                                 start: addr(i),
                                 end: addr(i),
@@ -456,7 +456,7 @@ impl<'p> Program<'p> {
 
                         if !matches!(terminal, Item::End) {
                             self.error(
-                                format!("Parse Error: `else` ending eith an `else`"),
+                                format!("Parse Error: `else` ending with an `else`"),
                                 Span {
                                     start: addr(i),
                                     end: addr(i),
@@ -480,7 +480,7 @@ impl<'p> Program<'p> {
 
                     if !matches!(terminal, Item::End) {
                         self.error(
-                            format!("Parse Error: `loop` ending eith an `else`"),
+                            format!("Parse Error: `loop` ending with an `else`"),
                             Span {
                                 start: addr(i),
                                 end: addr(i),

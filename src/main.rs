@@ -35,67 +35,29 @@ use nom::{
 //
 
 const MAIN_PROGRAM: &str = r#"
-    fn print_1d_point() {
-        struct Point {
-            x: Int
-        }
-        let x = Point { x: 1 }
-        print x
-        ret ()
+    struct SuperPoint {
+        x: (Int, Str)
+        y: Bool
     }
 
-    let _ = print_1d_point()
-    let print_point: fn() -> () = print_1d_point
-    let _ = print_point()
+    let sup = ((SuperPoint { x: (65, "what"), y: false }, 2), 7, ("hello", "there"))
+    print sup
+    print sup.0.0.x
+    print sup.0.0.x.1
+    print sup.2.1
 
-    let tuple = (1, "hello", true)
-    if tuple.2 {
-        struct Point {
-            x: Int
-            y: Int
-        }
+    set sup.1 = 5
+    print sup
+    set sup.0.1 = 3
+    print sup
+    set sup.2.0 = "bye"
+    print sup
+    set sup.0.0.x.1 = "wow!"
+    print sup
+    set sup.0.0.x.0 = add(sup.0.0.x.0, 4)
+    print sup
 
-        let captured_point = Point { x: 2, y: 4 }
-        fn print_2d_point() {
-            print captured_point
-            ret ()
-        }
-
-        let _ = print_2d_point();
-        set print_point = print_2d_point
-    }
-
-    struct Point {
-        x: Int
-        y: Int
-        z: Int
-    }
-
-    fn print_3d_point() -> Int {
-        let pt: Point = Point { x: 3, y: 5, z: 7 }
-        print pt
-        ret add(add(pt.x, pt.y), pt.z)
-    }
-
-    fn print_many() {
-        print "3 more times!!!"
-        let counter = 3
-        loop {
-            if eq(counter, 0) {
-                break
-            }
-            set counter = sub(counter, 1)
-            let _ = print_3d_point()
-        }
-        ret ()
-    }
-
-    let _ = print_1d_point()
-    let _ = print_point()
-    let res = print_3d_point()
-    print res
-    let _ = print_many()
-    ret res
+    ret sup.0.0.x.0
 "#;
 
 fn main() {
@@ -279,6 +241,12 @@ struct Statement<'p> {
 }
 
 #[derive(Debug, Clone)]
+struct VarPath<'p> {
+    ident: &'p str,
+    fields: Vec<&'p str>,
+}
+
+#[derive(Debug, Clone)]
 enum Stmt<'p> {
     If {
         expr: Expression<'p>,
@@ -293,7 +261,7 @@ enum Stmt<'p> {
         expr: Expression<'p>,
     },
     Set {
-        name: &'p str,
+        path: VarPath<'p>,
         expr: Expression<'p>,
     },
     Func {
@@ -323,11 +291,7 @@ enum Expr<'p> {
         args: Vec<Expression<'p>>,
     },
     Lit(Literal<'p>),
-    Var(&'p str),
-    Path {
-        ident: &'p str,
-        field: &'p str,
-    },
+    VarPath(VarPath<'p>),
     Tuple(Vec<Expression<'p>>),
     Named {
         name: &'p str,
@@ -694,13 +658,13 @@ fn stmt_let(i: &str) -> IResult<&str, Stmt> {
 fn stmt_set(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = tag("set")(i)?;
     let (i, _) = space1(i)?;
-    let (i, name) = ident(i)?;
+    let (i, path) = var_path(i)?;
     let (i, _) = space0(i)?;
     let (i, _) = tag("=")(i)?;
     let (i, _) = space0(i)?;
     let (i, expr) = expr(i)?;
 
-    Ok((i, Stmt::Set { name, expr }))
+    Ok((i, Stmt::Set { path, expr }))
 }
 
 fn stmt_return(i: &str) -> IResult<&str, Stmt> {
@@ -731,9 +695,7 @@ fn stmt_print(i: &str) -> IResult<&str, Stmt> {
 
 fn expr(i: &str) -> IResult<&str, Expression> {
     let start_of_expr = addr(i);
-    let (i, expr) = alt((
-        expr_tuple, expr_named, expr_call, expr_path, expr_lit, expr_var,
-    ))(i)?;
+    let (i, expr) = alt((expr_tuple, expr_named, expr_call, expr_lit, expr_var_path))(i)?;
     let end_of_expr = addr(i);
 
     Ok((
@@ -759,18 +721,28 @@ fn expr_call(i: &str) -> IResult<&str, Expr> {
     Ok((i, Expr::Call { func, args }))
 }
 
-fn expr_path(i: &str) -> IResult<&str, Expr> {
-    let (i, name) = ident(i)?;
-    let (i, _) = space0(i)?;
-    let (i, _) = tag(".")(i)?;
-    let (i, _) = space0(i)?;
-    let (i, field) = alt((ident, digit1))(i)?;
-
-    Ok((i, Expr::Path { ident: name, field }))
+fn expr_var_path(i: &str) -> IResult<&str, Expr> {
+    map(var_path, Expr::VarPath)(i)
 }
 
-fn expr_var(i: &str) -> IResult<&str, Expr> {
-    map(ident, Expr::Var)(i)
+fn var_path(i: &str) -> IResult<&str, VarPath> {
+    let (i, name) = ident(i)?;
+    let (i, _) = space0(i)?;
+
+    let res: IResult<_, _> = padded(tag("."))(i);
+    let (i, fields) = if let Ok((i, _)) = res {
+        separated_list1(char('.'), padded(alt((ident, digit1))))(i)?
+    } else {
+        (i, Vec::new())
+    };
+
+    Ok((
+        i,
+        VarPath {
+            ident: name,
+            fields,
+        },
+    ))
 }
 
 fn expr_lit(i: &str) -> IResult<&str, Expr> {
@@ -1419,17 +1391,20 @@ impl<'p> Program<'p> {
                         .vars
                         .insert(name.ident, expr_ty);
                 }
-                Stmt::Set { name, expr } => {
+                Stmt::Set {
+                    path: var_path,
+                    expr,
+                } => {
                     let expr_ty = self.check_expr(expr, ctx, captures);
-
-                    if let Some(mut var) = ctx.resolve_var(name) {
+                    if let Some(var) = ctx.resolve_var(var_path.ident) {
                         if var.is_local {
-                            let expected_ty = *var.entry.get();
-                            var.entry.insert(expr_ty);
+                            let var_ty = *var.entry.get();
+                            let expected_ty =
+                                self.resolve_var_path(ctx, var_ty, &var_path.fields, *stmt_span);
                             self.check_ty(ctx, expr_ty, expected_ty, "`set`", expr.span);
                         } else {
                             self.error(
-                                format!("Compile Error: Trying to `set` captured variable '{}' (captures are by-value!)", name),
+                                format!("Compile Error: Trying to `set` captured variable '{}' (captures are by-value!)", var_path.ident),
                                 *stmt_span,
                             )
                         }
@@ -1437,7 +1412,7 @@ impl<'p> Program<'p> {
                         self.error(
                             format!(
                                 "Compile Error: Trying to `set` undefined variable '{}'",
-                                name
+                                var_path.ident,
                             ),
                             *stmt_span,
                         )
@@ -1470,68 +1445,19 @@ impl<'p> Program<'p> {
             Expr::Lit(lit) => {
                 return ctx.memoize_ty(self, &lit.ty());
             }
-            Expr::Path { ident, field } => {
-                if let Some(var) = ctx.resolve_var(ident) {
+            Expr::VarPath(var_path) => {
+                if let Some(var) = ctx.resolve_var(var_path.ident) {
                     if !var.is_local {
-                        captures.insert(ident);
+                        captures.insert(var_path.ident);
                     }
                     let var_ty = *var.entry.get();
-
-                    match ctx.realize_ty(var_ty) {
-                        Ty::NamedStruct(struct_decl) => {
-                            for struct_field in &struct_decl.fields {
-                                if &struct_field.ident == field {
-                                    return struct_field.ty;
-                                }
-                            }
-                            self.error(
-                                format!(
-                                    "Compile Error: {} is not a field of {}",
-                                    field, struct_decl.name
-                                ),
-                                expr.span,
-                            )
-                        }
-                        Ty::Tuple(arg_tys) => {
-                            if let Some(field_ty) =
-                                field.parse::<usize>().ok().and_then(|idx| arg_tys.get(idx))
-                            {
-                                *field_ty
-                            } else {
-                                self.error(
-                                    format!(
-                                        "Compile Error: {} is not a field of {}",
-                                        field,
-                                        ctx.format_ty(var_ty)
-                                    ),
-                                    expr.span,
-                                )
-                            }
-                        }
-                        _ => self.error(
-                            format!(
-                                "Compile Error: there are no fields on type {}",
-                                ctx.format_ty(var_ty)
-                            ),
-                            expr.span,
+                    self.resolve_var_path(ctx, var_ty, &var_path.fields, expr.span)
+                } else {
+                    self.error(
+                        format!(
+                            "Compile Error: Use of undefined variable '{}'",
+                            var_path.ident
                         ),
-                    }
-                } else {
-                    self.error(
-                        format!("Compile Error: Use of undefined variable '{}'", ident),
-                        expr.span,
-                    )
-                }
-            }
-            Expr::Var(var_name) => {
-                if let Some(var) = ctx.resolve_var(var_name) {
-                    if !var.is_local {
-                        captures.insert(var_name);
-                    }
-                    return *var.entry.get();
-                } else {
-                    self.error(
-                        format!("Compile Error: Use of undefined variable '{}'", var_name),
                         expr.span,
                     )
                 }
@@ -1670,6 +1596,60 @@ NOTE: the types look the same, but the named types have different decls!"#,
             };
             self.error(msg, span)
         }
+    }
+
+    fn resolve_var_path(
+        &mut self,
+        ctx: &mut TyCtx<'p>,
+        root_ty: TyIdx,
+        path: &[&'p str],
+        span: Span,
+    ) -> TyIdx {
+        let mut cur_ty = root_ty;
+        'path: for field in path {
+            match ctx.realize_ty(cur_ty) {
+                Ty::NamedStruct(struct_decl) => {
+                    for struct_field in &struct_decl.fields {
+                        if &struct_field.ident == field {
+                            cur_ty = struct_field.ty;
+                            continue 'path;
+                        }
+                    }
+                    self.error(
+                        format!(
+                            "Compile Error: {} is not a field of {}",
+                            field, struct_decl.name
+                        ),
+                        span,
+                    )
+                }
+                Ty::Tuple(arg_tys) => {
+                    if let Some(field_ty) =
+                        field.parse::<usize>().ok().and_then(|idx| arg_tys.get(idx))
+                    {
+                        cur_ty = *field_ty;
+                        continue 'path;
+                    } else {
+                        self.error(
+                            format!(
+                                "Compile Error: {} is not a field of {}",
+                                field,
+                                ctx.format_ty(cur_ty)
+                            ),
+                            span,
+                        )
+                    }
+                }
+                _ => self.error(
+                    format!(
+                        "Compile Error: there are no fields on type {}",
+                        ctx.format_ty(cur_ty)
+                    ),
+                    span,
+                ),
+            }
+        }
+        cur_ty
     }
 }
 
@@ -1987,27 +1967,15 @@ impl<'p> Program<'p> {
                     let val = self.eval_expr(expr, envs);
                     envs.last_mut().unwrap().vals.insert(name.ident, val);
                 }
-                Stmt::Set { name, expr } => {
+                Stmt::Set {
+                    path: var_path,
+                    expr,
+                } => {
                     let val = self.eval_expr(expr, envs);
 
-                    let mut found = false;
-                    for env in envs.iter_mut().rev() {
-                        if let Some(_) = env.vals.get(name) {
-                            found = true;
-                            env.vals.insert(*name, val).unwrap();
-                            break;
-                        }
-                    }
-
-                    if !found {
-                        self.error(
-                            format!(
-                                "Runtime Error: Tried to set an undefined local variable {}",
-                                name
-                            ),
-                            *stmt_span,
-                        )
-                    }
+                    let base_val = self.eval_resolve_var(var_path.ident, envs);
+                    let sub_val = self.eval_resolve_var_path(base_val, &var_path.fields, expr.span);
+                    *sub_val = val;
                 }
                 Stmt::Struct(_struct_decl) => {
                     // TODO: ?
@@ -2016,7 +1984,7 @@ impl<'p> Program<'p> {
                     let captures = func
                         .captures
                         .iter()
-                        .map(|&var| (var, self.eval_resolve_var(var, envs)))
+                        .map(|&var| (var, self.eval_resolve_var(var, envs).clone()))
                         .collect();
 
                     envs.last_mut()
@@ -2096,7 +2064,7 @@ impl<'p> Program<'p> {
                 func: func_name,
                 args,
             } => {
-                let func = self.eval_resolve_var(func_name, envs);
+                let func = self.eval_resolve_var(func_name, envs).clone();
                 let evaled_args = args.iter().map(|expr| self.eval_expr(expr, envs)).collect();
 
                 match func {
@@ -2127,52 +2095,10 @@ impl<'p> Program<'p> {
                     .collect();
                 Val::Struct(name, evaled_fields)
             }
-            Expr::Var(var) => self.eval_resolve_var(var, envs),
-            Expr::Path { ident, field } => {
-                let val = self.eval_resolve_var(ident, envs);
-                match &val {
-                    Val::Tuple(args) => {
-                        if let Some(field_val) =
-                            field.parse::<usize>().ok().and_then(|idx| args.get(idx))
-                        {
-                            return field_val.clone();
-                        } else {
-                            let val = self.format_val(&val, true, 0);
-                            self.error(
-                                format!(
-                                    "Runtime Error: {} is not a valid index of {}: {}",
-                                    field, ident, val,
-                                ),
-                                expr.span,
-                            )
-                        }
-                    }
-                    Val::Struct(_name, fields) => {
-                        for (field_name, field_val) in fields {
-                            if field_name == field {
-                                return field_val.clone();
-                            }
-                        }
-                        let val = self.format_val(&val, true, 0);
-                        self.error(
-                            format!(
-                                "Runtime Error: {} is not a valid index of {}: {}",
-                                field, ident, val,
-                            ),
-                            expr.span,
-                        )
-                    }
-                    _ => {
-                        let val = self.format_val(&val, true, 0);
-                        self.error(
-                            format!(
-                                "Runtime Error: Tried to get a field on non-composite {}: {}",
-                                ident, val,
-                            ),
-                            expr.span,
-                        )
-                    }
-                }
+            Expr::VarPath(var_path) => {
+                let base_val = self.eval_resolve_var(var_path.ident, envs);
+                let sub_val = self.eval_resolve_var_path(base_val, &var_path.fields, expr.span);
+                sub_val.clone()
             }
             Expr::Lit(lit) => match lit {
                 Literal::Int(val) => Val::Int(*val),
@@ -2183,10 +2109,68 @@ impl<'p> Program<'p> {
         }
     }
 
-    fn eval_resolve_var<'e>(&mut self, var: &'p str, envs: &mut Vec<Env<'e, 'p>>) -> Val<'e, 'p> {
-        for env in envs.iter().rev() {
-            if let Some(val) = env.vals.get(var) {
-                return val.clone();
+    fn eval_resolve_var_path<'e, 'v>(
+        &mut self,
+        var: &'v mut Val<'e, 'p>,
+        path: &[&'p str],
+        span: Span,
+    ) -> &'v mut Val<'e, 'p> {
+        let mut cur_val = var;
+        'path: for field in path {
+            let temp = cur_val;
+            match temp {
+                Val::Tuple(args) => {
+                    if let Some(field_val) = field
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|idx| args.get_mut(idx))
+                    {
+                        cur_val = field_val;
+                        continue 'path;
+                    } else {
+                        let val = "TODO"; // self.format_val(cur_val, true, 0);
+                        self.error(
+                            format!("Runtime Error: {} is not a valid index of {}", field, val,),
+                            span,
+                        )
+                    }
+                }
+                Val::Struct(_name, fields) => {
+                    for (field_name, field_val) in fields {
+                        if field_name == field {
+                            cur_val = field_val;
+                            continue 'path;
+                        }
+                    }
+                    let val = "TODO"; // self.format_val(cur_val, true, 0);
+                    self.error(
+                        format!("Runtime Error: {} is not a valid index of {}", field, val,),
+                        span,
+                    )
+                }
+                _ => {
+                    let val = "TODO"; // self.format_val(cur_val, true, 0);
+                    self.error(
+                        format!(
+                            "Runtime Error: Tried to get a field on non-composite {}",
+                            val,
+                        ),
+                        span,
+                    )
+                }
+            }
+        }
+        cur_val
+    }
+
+    fn eval_resolve_var<'e, 'v>(
+        &mut self,
+        var: &'p str,
+        envs: &'v mut Vec<Env<'e, 'p>>,
+    ) -> &'v mut Val<'e, 'p> {
+        for env in envs.iter_mut().rev() {
+            if let Some(val) = env.vals.get_mut(var) {
+                return val;
             }
         }
         self.error(
@@ -4550,6 +4534,85 @@ Point { x: 3, y: 5, z: 7 }
 Point { x: 3, y: 5, z: 7 }
 Point { x: 3, y: 5, z: 7 }
 Point { x: 3, y: 5, z: 7 }
+"#
+        )
+    }
+
+    #[test]
+    fn test_complex_paths() {
+        let program = r#"
+            struct Point {
+                x: Int,
+                y: Bool,
+            }
+
+            let pt = Point { x: 1, y: true }
+            print pt
+            set pt.x = 3
+            print pt
+            set pt.y = false
+            print pt
+            set pt = Point { x: 17, y: true }
+            print pt
+
+            let tup = (1, "hello", false, ())
+            print tup
+            set tup.0 = 3
+            print tup
+            set tup.1 = "bye"
+            print tup
+            set tup.2 = true
+            print tup
+            set tup.3 = ()
+            print tup
+
+            struct SuperPoint {
+                x: (Int, Str)
+                y: Bool
+            }
+
+            let sup = ((SuperPoint { x: (65, "what"), y: false }, 2), 7, ("hello", "there"))
+            print sup
+            print sup.0.0.x
+            print sup.0.0.x.1
+            print sup.2.1
+
+            set sup.1 = 5
+            print sup
+            set sup.0.1 = 3
+            print sup
+            set sup.2.0 = "bye"
+            print sup
+            set sup.0.0.x.1 = "wow!"
+            print sup
+            set sup.0.0.x.0 = add(sup.0.0.x.0, 4)
+            print sup
+
+            ret sup.0.0.x.0
+        "#;
+
+        let (result, output) = run_typed(program);
+        assert_eq!(result, 69);
+        assert_eq!(
+            output.unwrap(),
+            r#"Point { x: 1, y: true }
+Point { x: 3, y: true }
+Point { x: 3, y: false }
+Point { x: 17, y: true }
+(1, "hello", false, ())
+(3, "hello", false, ())
+(3, "bye", false, ())
+(3, "bye", true, ())
+(3, "bye", true, ())
+((SuperPoint { x: (65, "what"), y: false }, 2), 7, ("hello", "there"))
+(65, "what")
+what
+there
+((SuperPoint { x: (65, "what"), y: false }, 2), 5, ("hello", "there"))
+((SuperPoint { x: (65, "what"), y: false }, 3), 5, ("hello", "there"))
+((SuperPoint { x: (65, "what"), y: false }, 3), 5, ("bye", "there"))
+((SuperPoint { x: (65, "wow!"), y: false }, 3), 5, ("bye", "there"))
+((SuperPoint { x: (69, "wow!"), y: false }, 3), 5, ("bye", "there"))
 "#
         )
     }

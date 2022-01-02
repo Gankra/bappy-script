@@ -461,8 +461,8 @@ fn test_a_bit_of_everything() {
         let print_point: fn() -> () = print_1d_point
         let _ = print_point()
 
-        let tuple = (1, "hello", true)
-        if tuple.2 {
+        let tuple = (1, (true, "hello"), false)
+        if tuple.1.0 {
             struct Point {
                 x: Int
                 y: Int

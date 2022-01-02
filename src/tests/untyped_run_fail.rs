@@ -105,28 +105,6 @@ fn eval_fail_no_ret() {
 
 #[test]
 #[should_panic(expected = "Runtime Error")]
-fn eval_fail_break_no_loop() {
-    let program = r#"
-        continue
-        ret 0
-    "#;
-
-    let (_result, _output) = run(program);
-}
-
-#[test]
-#[should_panic(expected = "Runtime Error")]
-fn eval_fail_continue_no_loop() {
-    let program = r#"
-        break
-        ret 0
-    "#;
-
-    let (_result, _output) = run(program);
-}
-
-#[test]
-#[should_panic(expected = "Runtime Error")]
 fn eval_fail_too_many_args() {
     let program = r#"
         fn f() {

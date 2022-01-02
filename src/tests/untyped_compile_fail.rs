@@ -47,3 +47,25 @@ fn compile_fail_recursive() {
 
     let (_result, _output) = run(program);
 }
+
+#[test]
+#[should_panic(expected = "Compile Error")]
+fn compile_fail_continue_no_loop() {
+    let program = r#"
+        continue
+        ret 0
+    "#;
+
+    let (_result, _output) = run(program);
+}
+
+#[test]
+#[should_panic(expected = "Compile Error")]
+fn compile_fail_break_no_loop() {
+    let program = r#"
+        break
+        ret 0
+    "#;
+
+    let (_result, _output) = run(program);
+}

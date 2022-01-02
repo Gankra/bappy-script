@@ -982,6 +982,7 @@ enum TyName<'p> {
     Unknown,
 }
 
+/// The structure of a type, with all subtypes resolved to type ids (TyIdx).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Ty<'p> {
     Int,
@@ -997,21 +998,53 @@ enum Ty<'p> {
     Unknown,
 }
 
+/// The Ty of a Struct.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StructTy<'p> {
     name: &'p str,
     fields: Vec<FieldTy<'p>>,
 }
 
+/// The Ty of a specific field of a struct.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FieldTy<'p> {
     ident: &'p str,
     ty: TyIdx,
 }
 
+/// A canonical type id.
 type TyIdx = usize;
 
 /// Information on all the types.
+///
+/// The key function of TyCtx is to `memoize` all parsed types (TyName) into
+/// type ids (TyIdx), to enable correct type comparison. Two types are equal
+/// *if and only if* they have the same TyIdx.
+///
+/// This is necessary because *nominal* types (TyName::Named, i.e. structs) can
+/// be messy due to shenanigans like captures/scoping/shadowing/inference. Types
+/// may refer to names that are out of scope, and two names that are equal
+/// (as strings) may not actually refer to the same type declaration.
+///
+/// To handle this, whenever a new named type is declared ([push_struct_decl][]),
+/// we generate a unique type id (TyIdx) for it. Then whenever we encounter
+/// a reference to a Named type, we lookup the currently in scope TyIdx for that
+/// name, and use that instead. Named type scoping is managed by `envs`.
+///
+/// Replacing type names with type ids requires a change of representation,
+/// which is why we have [Ty][]. A Ty is the *structure* of a type with all subtypes
+/// resolved to TyIdx's (e.g. a field of a tuple, the return type of a function).
+/// For convenience, non-typing metadata may also be stored in a Ty.
+///
+/// So a necessary intermediate step of converting TyName to a TyIdx is to first
+/// convert it to a Ty. This intermediate value is stored in `tys`.
+/// If you have a TyIdx, you can get its Ty with [realize_ty][]. This lets you
+/// e.g. check if a value being called is actually a Func, and if it is,
+/// what the type ids of its arguments/return types are.
+///
+/// `ty_map` stores all the *structural* Tys we've seen before (everything that
+/// *isn't* TyName::Named), ensuring two structural types have the same TyIdx.
+/// i.e. `(Bool, Int)` will have the same TyIdx everywhere it occurs.
 struct TyCtx<'p> {
     /// Whether static types are enabled/enforced.
     is_typed: bool,
@@ -1058,29 +1091,50 @@ struct CheckEnv<'p> {
     /// The struct definitions and TyIdx's
     tys: HashMap<&'p str, TyIdx>,
 
-    /// Whether this scope is the root of a function
-    /// (the scope of its arguments). If you walk over
-    /// this kind of frame, then you're accessing captures.
-    is_function_root: bool,
+    /// The kind of block this environment was introduced by.
+    ///
+    /// This is important for analyzing control flow and captures.
+    /// e.g. you need to know what scope a `break` or `continue` refers to.
+    block_kind: BlockKind,
 }
-struct CheckEntry<'a, 'p> {
+
+/// Kinds of blocks, see CheckEnv
+enum BlockKind {
+    Func,
+    Loop,
+    If,
+    Else,
+    /// Just a random block with no particular semantics other than it being
+    /// a scope for variables.
+    General,
+}
+
+/// The result of a resolve_var lookup, allowing the value (type) to be set.
+struct ResolvedVar<'a, 'p> {
+    /// How deep the capture was.
+    /// 0 = local (no capture)
+    /// 1 = captured from parent function
+    /// 2 = captured from grandparent function (parent must now capture it too)
+    /// ...etc
     capture_depth: usize,
+    /// The variable
     entry: std::collections::hash_map::OccupiedEntry<'a, &'p str, TyIdx>,
 }
 
 impl<'p> TyCtx<'p> {
-    fn resolve_var<'a>(&'a mut self, var_name: &'p str) -> Option<CheckEntry<'a, 'p>> {
+    /// Resolve a variable name (its type) at this point in the program.
+    fn resolve_var<'a>(&'a mut self, var_name: &'p str) -> Option<ResolvedVar<'a, 'p>> {
         // By default we're accessing locals
         let mut capture_depth = 0;
         use std::collections::hash_map::Entry;
         for env in self.envs.iter_mut().rev() {
             if let Entry::Occupied(entry) = env.vars.entry(var_name) {
-                return Some(CheckEntry {
+                return Some(ResolvedVar {
                     capture_depth,
                     entry,
                 });
             }
-            if env.is_function_root {
+            if let BlockKind::Func = env.block_kind {
                 // We're walking over a function root, so we're now
                 // accessing captures. We track this with an integer
                 // because if we capture multiple functions deep, our
@@ -1091,6 +1145,7 @@ impl<'p> TyCtx<'p> {
         None
     }
 
+    /// Register a new nominal struct in this scope.
     fn push_struct_decl(
         &mut self,
         program: &mut Program<'p>,
@@ -1117,6 +1172,8 @@ impl<'p> TyCtx<'p> {
         ty_idx
     }
 
+    /// Resolve the type id (TyIdx) associated with a nominal type (struct name),
+    /// at this point in the program.
     fn resolve_nominal_ty<'a>(&'a mut self, ty_name: &'p str) -> Option<TyIdx> {
         if self.is_typed {
             for (_depth, env) in self.envs.iter_mut().rev().enumerate() {
@@ -1130,6 +1187,10 @@ impl<'p> TyCtx<'p> {
         }
     }
 
+    /// Converts a TyName (parsed type) into a TyIdx (type id).
+    ///
+    /// All TyNames in the program must be memoized, as this is the only reliable
+    /// way to do type comparisons. See the top level docs of TyIdx for details.
     fn memoize_ty(&mut self, program: &mut Program<'p>, ty_name: &TyName<'p>) -> TyIdx {
         if self.is_typed {
             match ty_name {
@@ -1179,6 +1240,7 @@ impl<'p> TyCtx<'p> {
         }
     }
 
+    /// Converts a Ty (structural type with all subtypes resolved) into a TyIdx (type id).
     fn memoize_inner(&mut self, ty: Ty<'p>) -> TyIdx {
         if let Some(idx) = self.ty_map.get(&ty) {
             *idx
@@ -1192,6 +1254,7 @@ impl<'p> TyCtx<'p> {
         }
     }
 
+    /// Get the type-structure (Ty) associated with this type id (TyIdx).
     fn realize_ty(&self, ty: TyIdx) -> &Ty<'p> {
         if self.is_typed {
             self.tys
@@ -1202,6 +1265,7 @@ impl<'p> TyCtx<'p> {
         }
     }
 
+    /// Stringify a type.
     fn format_ty(&self, ty: TyIdx) -> String {
         match self.realize_ty(ty) {
             Ty::Int => format!("Int"),
@@ -1244,6 +1308,11 @@ impl<'p> TyCtx<'p> {
 }
 
 impl<'p> Program<'p> {
+    /// Type check the program, including some mild required "compilation".
+    ///
+    /// The "compilation" is just computing each closure's capture set, which
+    /// the runtime needs to know to save the relevant state when it finds a
+    /// function decl.
     fn check(&mut self) {
         let mut ctx = TyCtx {
             tys: Vec::new(),
@@ -1269,11 +1338,16 @@ impl<'p> Program<'p> {
             vars: builtins,
             tys: HashMap::new(),
             // Doesn't really matter what this value is for the globals
-            is_function_root: false,
+            block_kind: BlockKind::General,
         };
         ctx.envs.push(globals);
+
+        // We keep capture info separate from the ctx to avoid some borrowing
+        // hairballs, since we're generally trying to update the captures just
+        // as we get a mutable borrow of a variable in the ctx.
         let mut captures = Vec::new();
 
+        // Time to start analyzing!!
         let mut main = self.main.take().unwrap();
         self.check_func(&mut main, &mut ctx, &mut captures);
 
@@ -1290,12 +1364,16 @@ impl<'p> Program<'p> {
         self.main = Some(main);
     }
 
+    /// Analyze/Compile a function
     fn check_func(
         &mut self,
         func: &mut Function<'p>,
         ctx: &mut TyCtx<'p>,
         captures: &mut Vec<HashSet<&'p str>>,
     ) {
+        // Give the function's arguments their own scope, and register
+        // that scope as the "root" of the function (for the purposes of
+        // captures).
         let vars = func
             .args
             .iter()
@@ -1315,11 +1393,14 @@ impl<'p> Program<'p> {
         ctx.envs.push(CheckEnv {
             vars,
             tys: HashMap::new(),
-            is_function_root: true,
+            block_kind: BlockKind::Func,
         });
 
+        // Start collecting up the captures for this function
         captures.push(HashSet::new());
 
+        // Grab the return type, we'll need this to validate return
+        // statements in the body.
         let return_ty = if let TyName::Func { return_ty, .. } = &func.ty {
             return_ty
         } else {
@@ -1330,30 +1411,55 @@ impl<'p> Program<'p> {
         };
 
         // If the `-> Type` is omitted from a function decl, assume
-        // the empty tuple `()`, just like Rust.
+        // the function returns the empty tuple `()`, just like Rust.
         let mut return_ty = ctx.memoize_ty(self, return_ty);
         if return_ty == ctx.ty_unknown {
             return_ty = ctx.ty_empty;
         }
 
-        self.check_block(&mut func.stmts, ctx, captures, return_ty);
+        // Do the analysis!!
+        self.check_block(
+            &mut func.stmts,
+            ctx,
+            captures,
+            return_ty,
+            BlockKind::General,
+        );
 
+        // Cleanup
         func.captures = captures.pop().unwrap();
         ctx.envs.pop();
     }
 
+    /// Analyze/Compile a block of the program (fn body, if, loop, ...).
     fn check_block(
         &mut self,
         stmts: &mut [Statement<'p>],
         ctx: &mut TyCtx<'p>,
         captures: &mut Vec<HashSet<&'p str>>,
         return_ty: TyIdx,
+        block_kind: BlockKind,
     ) {
+        // Create a new scope for all the local variables declared in this block.
         ctx.envs.push(CheckEnv {
             vars: HashMap::new(),
             tys: HashMap::new(),
-            is_function_root: false,
+            block_kind,
         });
+
+        // Now analyze all the statements. We need to:
+        //
+        // * recursively analyze all sub-expressions (yielding their computed type)
+        // * typecheck subexprs (compare their computed type to an expected type, if any)
+        // * register variable names and their types (i.e. for `let` and `fn`)
+        // * resolve variable names (usually this is done by check_expr, as VarPaths are exprs)
+        //   * register captures of those variables (needed by the runtime)
+        // * register type decls as new (scoped) types (i.e. struct decls)
+        // * check that control flow makes sense (e.g. break/continue validation)
+        //
+        // A big part of this process is managed by the ctx (TyCtx), which keeps
+        // track of all the known types and variables. See `memoize_ty` for details.
+
         for Statement {
             code: stmt,
             span: stmt_span,
@@ -1369,11 +1475,11 @@ impl<'p> Program<'p> {
                     let expected_ty = ctx.memoize_ty(self, &TyName::Bool);
 
                     self.check_ty(ctx, expr_ty, expected_ty, "`if`", expr.span);
-                    self.check_block(stmts, ctx, captures, return_ty);
-                    self.check_block(else_stmts, ctx, captures, return_ty);
+                    self.check_block(stmts, ctx, captures, return_ty, BlockKind::If);
+                    self.check_block(else_stmts, ctx, captures, return_ty, BlockKind::Else);
                 }
                 Stmt::Loop { stmts } => {
-                    self.check_block(stmts, ctx, captures, return_ty);
+                    self.check_block(stmts, ctx, captures, return_ty, BlockKind::Loop);
                 }
                 Stmt::Struct(struct_decl) => {
                     ctx.push_struct_decl(self, struct_decl.clone());
@@ -1397,6 +1503,9 @@ impl<'p> Program<'p> {
                         self.check_ty(ctx, expr_ty, expected_ty, "`let`", expr.span);
                     }
 
+                    // Register this variable in the current scope. This may overwrite
+                    // an existing variable in the scope, but that's ok because
+                    // it has been completely shadowed and can never be referenced again.
                     ctx.envs
                         .last_mut()
                         .unwrap()
@@ -1409,11 +1518,17 @@ impl<'p> Program<'p> {
                 } => {
                     let expr_ty = self.check_expr(expr, ctx, captures);
                     if let Some(var) = ctx.resolve_var(var_path.ident) {
+                        // Only allow locals (non-captures) to be `set`, because captures
+                        // are by-value, so setting a capture is probably a mistake we don't
+                        // want the user to make.
                         if var.capture_depth == 0 {
                             let var_ty = *var.entry.get();
                             let expected_ty =
                                 self.resolve_var_path(ctx, var_ty, &var_path.fields, *stmt_span);
                             self.check_ty(ctx, expr_ty, expected_ty, "`set`", expr.span);
+
+                            // Unlike let, we don't actually need to update the variable
+                            // because its type isn't allowed to change!
                         } else {
                             self.error(
                                 format!("Compile Error: Trying to `set` captured variable '{}' (captures are by-value!)", var_path.ident),
@@ -1437,10 +1552,30 @@ impl<'p> Program<'p> {
                 }
                 Stmt::Print { expr } => {
                     let _expr_ty = self.check_expr(expr, ctx, captures);
-                    // Print takes any value, it's magic!
+                    // Print takes any type, it's magic!
                 }
                 Stmt::Break | Stmt::Continue => {
-                    // Nothing to analyze
+                    // Only allow these statements if we're inside a loop!
+                    let mut found_loop = false;
+                    for env in ctx.envs.iter().rev() {
+                        match env.block_kind {
+                            BlockKind::Loop => {
+                                found_loop = true;
+                                break;
+                            }
+                            BlockKind::Func => {
+                                // Reached a function boundary, so there's no loop in scope.
+                                break;
+                            }
+                            BlockKind::If | BlockKind::Else | BlockKind::General => {
+                                // Do nothing, keep searching
+                            }
+                        }
+                    }
+
+                    if !found_loop {
+                        self.error(format!("Compile Error: This isn't in a loop!"), *stmt_span)
+                    }
                 }
             }
         }

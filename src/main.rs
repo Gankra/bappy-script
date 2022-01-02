@@ -1075,7 +1075,10 @@ impl<'p> TyCtx<'p> {
         use std::collections::hash_map::Entry;
         for env in self.envs.iter_mut().rev() {
             if let Entry::Occupied(entry) = env.vars.entry(var_name) {
-                return Some(CheckEntry { capture_depth, entry });
+                return Some(CheckEntry {
+                    capture_depth,
+                    entry,
+                });
             }
             if env.is_function_root {
                 // We're walking over a function root, so we're now
@@ -1287,7 +1290,12 @@ impl<'p> Program<'p> {
         self.main = Some(main);
     }
 
-    fn check_func(&mut self, func: &mut Function<'p>, ctx: &mut TyCtx<'p>, captures: &mut Vec<HashSet<&'p str>>) {
+    fn check_func(
+        &mut self,
+        func: &mut Function<'p>,
+        ctx: &mut TyCtx<'p>,
+        captures: &mut Vec<HashSet<&'p str>>,
+    ) {
         let vars = func
             .args
             .iter()

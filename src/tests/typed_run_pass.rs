@@ -626,9 +626,14 @@ fn test_nested_capture() {
             let capture = 7
             fn outer_capturer() -> fn () -> Int {
                 fn inner_capturer() -> Int {
+                    // Nested capture, forcing outer_capturer to capture
                     print capture
                     ret capture
                 }
+                // Make sure this implicit capture doesn't mess up our
+                // ability to define our own variables with that name
+                let capture = 12
+                print capture
                 ret inner_capturer
             }
             set func = outer_capturer
@@ -641,8 +646,8 @@ fn test_nested_capture() {
     assert_eq!(result, 7);
     assert_eq!(
         output.unwrap(),
-        r#"7
+        r#"12
+7
 "#
     )
 }
-

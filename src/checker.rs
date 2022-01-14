@@ -467,6 +467,7 @@ impl<'p> Program<'p> {
             cfg.func_stack.is_empty(),
             "Internal Compiler Error: Funcs were not popped!"
         );
+        println!();
         cfg.print(&ctx);
         self.main = Some(main);
     }
@@ -587,7 +588,7 @@ impl<'p> Program<'p> {
         captures: &mut Vec<BTreeMap<&'p str, Reg>>,
         return_ty: TyIdx,
         block_kind: BlockKind,
-    ) {
+    ) -> BasicBlockIdx {
         // Create a new scope for all the local variables declared in this block.
         ctx.envs.push(CheckEnv {
             vars: HashMap::new(),
@@ -667,7 +668,7 @@ impl<'p> Program<'p> {
                     let post_loop_bb = cfg.push_basic_block();
 
                     cfg.push_loop(loop_bb, post_loop_bb);
-                    self.check_block(
+                    let final_loop_bb = self.check_block(
                         stmts,
                         ctx,
                         cfg,
@@ -677,10 +678,13 @@ impl<'p> Program<'p> {
                         BlockKind::Loop,
                     );
 
-                    cfg.bb(bb).stmts.push(CfgStmt::Jump(BasicBlockJmp {
-                        block_id: loop_bb,
-                        args: Vec::new(),
-                    }));
+                    // Make the last loop bb jump to the start of the loop
+                    cfg.bb(final_loop_bb)
+                        .stmts
+                        .push(CfgStmt::Jump(BasicBlockJmp {
+                            block_id: loop_bb,
+                            args: Vec::new(),
+                        }));
 
                     cfg.pop_loop();
                     bb = post_loop_bb;
@@ -710,13 +714,8 @@ impl<'p> Program<'p> {
                         capture_regs.push(capture_temp.reg);
                     }
 
-                    let new_reg = if captures.is_empty() {
-                        let new_reg = cfg.push_reg(func_ty);
-                        cfg.bb(bb).stmts.push(CfgStmt::RegFromFunc {
-                            new_reg,
-                            global_func,
-                        });
-                        new_reg
+                    let new_var = if capture_regs.is_empty() {
+                        Var::global_func(func_ty, global_func)
                     } else {
                         let new_reg = cfg.push_reg(func_ty);
                         cfg.bb(bb).stmts.push(CfgStmt::RegFromClosure {
@@ -724,15 +723,10 @@ impl<'p> Program<'p> {
                             global_func,
                             captures: capture_regs,
                         });
-                        new_reg
+                        Var::reg(func_ty, new_reg)
                     };
 
-                    let func_var = Var::reg(func_ty, new_reg);
-                    ctx.envs
-                        .last_mut()
-                        .unwrap()
-                        .vars
-                        .insert(func.name, func_var);
+                    ctx.envs.last_mut().unwrap().vars.insert(func.name, new_var);
                 }
                 Stmt::Let { name, expr, is_mut } => {
                     let expr_temp = self.check_expr(expr, ctx, cfg, bb, captures);
@@ -879,6 +873,7 @@ impl<'p> Program<'p> {
             }
         }
         ctx.envs.pop();
+        bb
     }
 
     fn check_expr(
@@ -903,21 +898,27 @@ impl<'p> Program<'p> {
                 if let Some(var) = ctx.resolve_var(var_path.ident) {
                     let capture_depth = var.capture_depth;
                     let mut src_var = var.entry.get().clone();
-                    for (captures, depth) in captures.iter_mut().rev().zip(0..capture_depth) {
-                        let capture_temp = captures.entry(var_path.ident).or_insert_with(|| {
-                            let func_idx = cfg.funcs.len() - depth - 1;
-                            let func = &mut cfg.funcs[func_idx];
-                            let capture_ty = src_var.ty();
-                            func.regs.push(RegDecl { ty: capture_ty });
-                            let capture_reg = RegIdx(func.regs.len() - 1);
-                            Reg {
-                                ty: capture_ty,
-                                reg: capture_reg,
-                            }
-                        });
+                    let is_global_func = matches!(src_var, Var::GlobalFunc { .. });
 
-                        if depth == 0 {
-                            src_var = Var::reg(capture_temp.ty, capture_temp.reg);
+                    // Don't capture global function pointers
+                    if !is_global_func {
+                        for (captures, depth) in captures.iter_mut().rev().zip(0..capture_depth) {
+                            let capture_temp =
+                                captures.entry(var_path.ident).or_insert_with(|| {
+                                    let func_idx = cfg.funcs.len() - depth - 1;
+                                    let func = &mut cfg.funcs[func_idx];
+                                    let capture_ty = src_var.ty();
+                                    func.regs.push(RegDecl { ty: capture_ty });
+                                    let capture_reg = RegIdx(func.regs.len() - 1);
+                                    Reg {
+                                        ty: capture_ty,
+                                        reg: capture_reg,
+                                    }
+                                });
+
+                            if depth == 0 {
+                                src_var = Var::reg(capture_temp.ty, capture_temp.reg);
+                            }
                         }
                     }
 
@@ -1038,21 +1039,26 @@ impl<'p> Program<'p> {
                 if let Some(var) = ctx.resolve_var(func) {
                     let capture_depth = var.capture_depth;
                     let mut func_var = var.entry.get().clone();
-                    for (captures, depth) in captures.iter_mut().rev().zip(0..capture_depth) {
-                        let capture_temp = captures.entry(func).or_insert_with(|| {
-                            let func_idx = cfg.funcs.len() - depth - 1;
-                            let func = &mut cfg.funcs[func_idx];
-                            let capture_ty = func_var.ty();
-                            func.regs.push(RegDecl { ty: capture_ty });
-                            let capture_reg = RegIdx(func.regs.len() - 1);
-                            Reg {
-                                ty: capture_ty,
-                                reg: capture_reg,
-                            }
-                        });
+                    let is_global_func = matches!(func_var, Var::GlobalFunc { .. });
 
-                        if depth == 0 {
-                            func_var = Var::reg(capture_temp.ty, capture_temp.reg);
+                    // Don't capture global function pointers
+                    if !is_global_func {
+                        for (captures, depth) in captures.iter_mut().rev().zip(0..capture_depth) {
+                            let capture_temp = captures.entry(func).or_insert_with(|| {
+                                let func_idx = cfg.funcs.len() - depth - 1;
+                                let func = &mut cfg.funcs[func_idx];
+                                let capture_ty = func_var.ty();
+                                func.regs.push(RegDecl { ty: capture_ty });
+                                let capture_reg = RegIdx(func.regs.len() - 1);
+                                Reg {
+                                    ty: capture_ty,
+                                    reg: capture_reg,
+                                }
+                            });
+
+                            if depth == 0 {
+                                func_var = Var::reg(capture_temp.ty, capture_temp.reg);
+                            }
                         }
                     }
 
@@ -1229,10 +1235,6 @@ enum CfgStmt<'p> {
         new_reg: RegIdx,
         lit: Literal<'p>,
     },
-    RegFromFunc {
-        new_reg: RegIdx,
-        global_func: GlobalFuncIdx,
-    },
     RegFromClosure {
         new_reg: RegIdx,
         global_func: GlobalFuncIdx,
@@ -1348,6 +1350,9 @@ impl<'p> Cfg<'p> {
         for (nominal_ty_idx, nominal_ty) in self.nominals.iter().enumerate() {
             if let Ty::NamedStruct(struct_ty) = ctx.realize_ty(*nominal_ty) {
                 println!("#struct{}_{} {{", nominal_ty_idx, struct_ty.name);
+                for field in &struct_ty.fields {
+                    println!("  {}: {}", field.ident, ctx.format_ty(field.ty));
+                }
                 println!("}}");
                 println!();
             } else {
@@ -1430,16 +1435,6 @@ impl<'p> FuncCfg<'p> {
                     CfgStmt::RegFromLit { new_reg, lit } => {
                         println!("    %{} = {:?}", new_reg.0, lit);
                     }
-                    CfgStmt::RegFromFunc {
-                        new_reg,
-                        global_func,
-                    } => {
-                        let func = &cfg.funcs[global_func.0];
-                        println!(
-                            "    %{} = #fn{}_{}",
-                            new_reg.0, global_func.0, func.func_name
-                        );
-                    }
                     CfgStmt::RegFromClosure {
                         new_reg,
                         global_func,
@@ -1447,7 +1442,7 @@ impl<'p> FuncCfg<'p> {
                     } => {
                         let func = &cfg.funcs[global_func.0];
                         print!(
-                            "    %{} = (#fn{}_{}, (",
+                            "    %{} = [closure](#fn{}_{}, (",
                             new_reg.0, global_func.0, func.func_name
                         );
                         for (capture_idx, capture) in captures.iter().enumerate() {

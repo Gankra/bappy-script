@@ -20,10 +20,26 @@ const MAIN_PROGRAM: &str = r#"
         ret add(arg, pt.y)
     }
 
+    fn no_captures(arg: Int) -> Int {
+        ret add(arg, arg)
+    }
+
+    fn calls_funcs() -> Int {
+        let a = captures(23)
+        let b = no_captures(29)
+        ret add(a, b)
+    }
+
     let my_fn = captures
+    let my_fn2 = no_captures
 
     print captures(2)
     print my_fn(3)
+
+    print no_captures(6)
+    print my_fn2(7)
+
+    print calls_funcs()
 
     let x = 1
     let y = true

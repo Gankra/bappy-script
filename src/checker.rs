@@ -430,7 +430,8 @@ impl<'p> Program<'p> {
             .iter()
             .map(|builtin| {
                 let global_ty = ctx.memoize_ty(self, &builtin.ty);
-                let new_global = cfg.push_global_func(builtin.name, global_ty);
+                let new_global =
+                    cfg.push_global_func(builtin.name, builtin.args.to_owned(), global_ty);
                 // Intrinsics have no bodies, pop them immediately
                 cfg.pop_global_func();
                 (builtin.name, Var::global_func(global_ty, new_global))
@@ -479,21 +480,27 @@ impl<'p> Program<'p> {
         ctx: &mut TyCtx<'p>,
         cfg: &mut Cfg<'p>,
         captures: &mut Vec<BTreeMap<&'p str, Reg>>,
-    ) -> GlobalFuncIdx {
-        let func_idx = cfg.push_global_func(func.name, ctx.ty_unknown);
-
+    ) -> (GlobalFuncIdx, TyIdx) {
         // Give the function's arguments their own scope, and register
         // that scope as the "root" of the function (for the purposes of
         // captures).
         let mut ast_vars = HashMap::new();
-        let mut cfg_args = Vec::new();
+        let mut arg_regs = Vec::new();
+        let mut arg_tys = Vec::new();
+        let mut arg_names = Vec::new();
+
+        // Some of these values are dummies we will fill in later
+        let func_idx = cfg.push_global_func(func.name, Vec::new(), ctx.ty_unknown);
+        let func_bb = cfg.push_basic_block();
 
         for decl in &func.args {
             let ty = ctx.memoize_ty(self, &decl.ty);
             if !self.typed || ty != ctx.ty_unknown {
                 let reg = cfg.push_reg(ty);
                 ast_vars.insert(decl.ident, Var::reg(ty, reg));
-                cfg_args.push(reg);
+                arg_regs.push(reg);
+                arg_tys.push(ty);
+                arg_names.push(decl.ident);
             } else {
                 self.error(
                     format!("Compile Error: function arguments must have types"),
@@ -501,9 +508,6 @@ impl<'p> Program<'p> {
                 )
             }
         }
-
-        let func_bb = cfg.push_basic_block();
-        cfg.bb(func_bb).args = cfg_args;
 
         ctx.envs.push(CheckEnv {
             vars: ast_vars,
@@ -532,6 +536,16 @@ impl<'p> Program<'p> {
             return_ty = ctx.ty_empty;
         }
 
+        let func_ty = ctx.memoize_inner(Ty::Func { arg_tys, return_ty });
+
+        // Fill in dummied values
+        {
+            let func = cfg.funcs.last_mut().unwrap();
+            func.func_ty = func_ty;
+            func.func_arg_names = arg_names;
+            cfg.bb(func_bb).args = arg_regs;
+        }
+
         // Do the analysis!!
         self.check_block(
             &mut func.stmts,
@@ -548,7 +562,12 @@ impl<'p> Program<'p> {
 
         if !func.captures.is_empty() {
             // TODO: properly type the captures
-            let captures_ty = ctx.ty_unknown;
+            let arg_tys = func
+                .captures
+                .iter()
+                .map(|(_cap_name, cap)| cap.ty)
+                .collect();
+            let captures_ty = ctx.memoize_inner(Ty::Tuple(arg_tys));
             let captures_arg_reg = cfg.push_reg(captures_ty);
             cfg.bb(func_bb).args.push(captures_arg_reg);
 
@@ -575,7 +594,7 @@ impl<'p> Program<'p> {
         );
         cfg.pop_global_func();
 
-        func_idx
+        (func_idx, func_ty)
     }
 
     /// Analyze/Compile a block of the program (fn body, if, loop, ...).
@@ -696,9 +715,7 @@ impl<'p> Program<'p> {
                     // We push a func's name after checking it to avoid
                     // infinite capture recursion. This means naive recursion
                     // is illegal.
-                    let global_func = self.check_func(func, ctx, cfg, captures);
-
-                    let func_ty = ctx.memoize_ty(self, &func.ty);
+                    let (global_func, func_ty) = self.check_func(func, ctx, cfg, captures);
 
                     let mut capture_regs = Vec::new();
                     for (capture_name, _callee_capture_reg) in &func.captures {
@@ -1203,6 +1220,7 @@ struct Cfg<'p> {
 
 struct FuncCfg<'p> {
     func_name: &'p str,
+    func_arg_names: Vec<&'p str>,
     func_ty: TyIdx,
     // (loop_bb, post_loop_bb)
     loops: Vec<(BasicBlockIdx, BasicBlockIdx)>,
@@ -1317,9 +1335,15 @@ impl<'p> Cfg<'p> {
         &mut self.func().blocks[bb_idx.0]
     }
 
-    fn push_global_func(&mut self, func_name: &'p str, func_ty: TyIdx) -> GlobalFuncIdx {
+    fn push_global_func(
+        &mut self,
+        func_name: &'p str,
+        func_arg_names: Vec<&'p str>,
+        func_ty: TyIdx,
+    ) -> GlobalFuncIdx {
         self.funcs.push(FuncCfg {
             func_name,
+            func_arg_names,
             func_ty,
             blocks: Vec::new(),
             regs: Vec::new(),
@@ -1363,11 +1387,19 @@ impl<'p> Cfg<'p> {
         for (func_idx, func) in self.funcs.iter().enumerate() {
             print!("#fn{}_{}(", func_idx, func.func_name);
             if !func.blocks.is_empty() {
-                for (arg_idx, arg) in func.blocks[0].args.iter().enumerate() {
+                let arg_regs = func.blocks[0].args.iter();
+                let arg_names = func.func_arg_names.iter().chain(Some(&"[closure]"));
+                for (arg_idx, (arg_reg_idx, arg_name)) in arg_regs.zip(arg_names).enumerate() {
                     if arg_idx != 0 {
                         print!(", ");
                     }
-                    print!("%{}", arg.0);
+                    let arg_reg = &func.regs[arg_reg_idx.0];
+                    print!(
+                        "%{}_{}: {}",
+                        arg_reg_idx.0,
+                        arg_name,
+                        ctx.format_ty(arg_reg.ty)
+                    );
                 }
             }
             println!("):");

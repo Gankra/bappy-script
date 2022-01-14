@@ -1,0 +1,70 @@
+---
+source: src/tests/cfg_snaps.rs
+assertion_line: 86
+expression: cfg
+
+---
+[intrinsic] #fn0_add(lhs, rhs)
+[intrinsic] #fn1_sub(lhs, rhs)
+[intrinsic] #fn2_mul(lhs, rhs)
+[intrinsic] #fn3_eq(lhs, rhs)
+[intrinsic] #fn4_not(rhs)
+
+#fn5_main():
+  bb0():
+    %0 = Bool(true)
+    %1 = Int(3)
+    %2 = alloca()
+    (*%2) = %1
+    jmp bb1()
+
+  bb1():
+    %3 = (*%2)
+    %4 = Int(0)
+    %5 = #fn3_eq(%3, %4)
+    cond %5: bb3(), bb4()
+
+  bb2():
+    %13 = Int(0)
+    ret %13
+
+  bb3():
+    jmp bb2()
+    jmp bb5()
+
+  bb4():
+    jmp bb5()
+
+  bb5():
+    %6 = (*%2)
+    %7 = Int(1)
+    %8 = #fn1_sub(%6, %7)
+    (*%2) = %8
+    %9 = (*%2)
+    print %9
+    jmp bb6()
+
+  bb6():
+    %10 = Str("hello")
+    print %10
+    cond %0: bb8(), bb9()
+
+  bb7():
+    %12 = Str("looped!")
+    print %12
+    jmp bb1()
+
+  bb8():
+    jmp bb7()
+    jmp bb10()
+
+  bb9():
+    jmp bb6()
+    jmp bb10()
+
+  bb10():
+    %11 = Str("unreachable")
+    print %11
+    jmp bb6()
+
+

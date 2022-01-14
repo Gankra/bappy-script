@@ -11,8 +11,9 @@
 //! See `fn parse` for the primary entry point.
 
 use crate::*;
+use checker::Reg;
 
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use nom::{
@@ -67,7 +68,7 @@ pub struct Function<'p> {
     pub args: Vec<VarDecl<'p>>,
     pub stmts: Vec<Statement<'p>>,
     pub ty: TyName<'p>,
-    pub captures: HashSet<&'p str>,
+    pub captures: BTreeMap<&'p str, Reg>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,7 +217,7 @@ impl<'p> Program<'p> {
                 arg_tys: vec![],
                 return_ty: Box::new(TyName::Int),
             },
-            captures: HashSet::new(),
+            captures: BTreeMap::new(),
         });
 
         if !matches!(terminal, Item::End) {
@@ -285,7 +286,7 @@ impl<'p> Program<'p> {
                             args,
                             stmts: block_stmts,
                             // Captures are populated by the type checker
-                            captures: HashSet::new(),
+                            captures: BTreeMap::new(),
                         },
                     }
                 }

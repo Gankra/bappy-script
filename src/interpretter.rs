@@ -174,7 +174,7 @@ impl<'p> Program<'p> {
                     let captures = func
                         .captures
                         .iter()
-                        .map(|&var| (var, self.eval_resolve_var(var, envs).clone()))
+                        .map(|(&var, _)| (var, self.eval_resolve_var(var, envs).clone()))
                         .collect();
 
                     envs.last_mut()

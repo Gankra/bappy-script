@@ -10,6 +10,21 @@ mod parser;
 
 // The program that will be run with `cargo run`
 const MAIN_PROGRAM: &str = r#"
+    struct Point {
+        x: Int,
+        y: Int,
+    }
+    
+    let pt = Point { x: 2, y: 7 }
+    fn captures(arg: Int) -> Int {
+        ret add(arg, pt.y)
+    }
+
+    let my_fn = captures
+
+    print captures(2)
+    print my_fn(3)
+
     let x = 1
     let y = true
     let z = (x, y)

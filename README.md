@@ -220,7 +220,7 @@ Not depending on the checker helps catch bugs in the checker.
 
 Nothing is terribly optimized. Any time a value is semantically moved it's Cloned
 (and things like tuples, closures, and structs all contain Vecs!). But even given
-that, compiling and evaluating the ~100 programs that are currently in the tests
+that, compiling and evaluating the \~100 programs that are currently in the tests
 is basically instantaneous on my beefy work machine.
 
 There's a lot more lifetimes in the interpreter than there really should be.

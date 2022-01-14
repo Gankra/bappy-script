@@ -12,7 +12,7 @@ fn test_basic() {
             ret mul(x, x)
         }
 
-        let x:Int=6
+        let mut x:Int=6
         let cond: Bool = true
 
         if cond {
@@ -89,7 +89,7 @@ fn test_fn_tys() {
 #[test]
 fn test_empty_ty() {
     let program = r#"
-        let x: () = ()
+        let mut x: () = ()
         set x = ()
         let y: () = x
 
@@ -178,7 +178,7 @@ fn test_weird_print_ty() {
 #[test]
 fn test_aggregates_basic() {
     let program = r#"
-        let factors:(Int,Bool)=( 0, true )
+        let mut factors:(Int,Bool)=( 0, true )
         let factors2: ( Int, Bool ) = (0,true)
         print factors
         set factors = (2, false) 
@@ -189,7 +189,7 @@ fn test_aggregates_basic() {
             y: Str
         }
 
-        let pt: Point = Point { x : 0, y : "hello" }
+        let mut pt: Point = Point { x : 0, y : "hello" }
         let pt2:Point=Point{x:0,y:"hello"}
         print pt
         set pt = Point { x: 3, y: "bye" }
@@ -223,7 +223,7 @@ fn test_aggregates_captures() {
         }
 
         let _:Int = print_1d_point()
-        let print_point: fn() -> Int = print_1d_point
+        let mut print_point: fn() -> Int = print_1d_point
         let _:Int = print_point()
 
         if true {
@@ -285,7 +285,7 @@ fn test_nominal_shadowing() {
         }
 
         let x1: Point = Point { x: 1, y: 3, z: 7 }
-        let x2: Point = Point { x: 2, y: 5, z: 9 }
+        let mut x2: Point = Point { x: 2, y: 5, z: 9 }
         print x1
         print x2
 
@@ -384,7 +384,7 @@ fn test_inference_basic() {
             z: Int,
         }
 
-        let pt = Point { x: 3, y: 7, z: 12 }
+        let mut pt = Point { x: 3, y: 7, z: 12 }
         print pt
         print pt.x
         print pt.y
@@ -458,7 +458,7 @@ fn test_a_bit_of_everything() {
         }
 
         let _ = print_1d_point()
-        let print_point: fn() -> () = print_1d_point
+        let mut print_point: fn() -> () = print_1d_point
         let _ = print_point()
 
         let tuple = (1, (true, "hello"), false)
@@ -492,7 +492,7 @@ fn test_a_bit_of_everything() {
 
         fn print_many() {
             print "3 more times!!!"
-            let counter = 3
+            let mut counter = 3
             loop {
                 if eq(counter, 0) {
                     break
@@ -538,7 +538,7 @@ fn test_complex_paths() {
             y: Bool,
         }
 
-        let pt = Point { x: 1, y: true }
+        let mut pt = Point { x: 1, y: true }
         print pt
         set pt.x = 3
         print pt
@@ -547,7 +547,7 @@ fn test_complex_paths() {
         set pt = Point { x: 17, y: true }
         print pt
 
-        let tup = (1, "hello", false, ())
+        let mut tup = (1, "hello", false, ())
         print tup
         set tup.0 = 3
         print tup
@@ -563,7 +563,7 @@ fn test_complex_paths() {
             y: Bool
         }
 
-        let sup = ((SuperPoint { x: (65, "what"), y: false }, 2), 7, ("hello", "there"))
+        let mut sup = ((SuperPoint { x: (65, "what"), y: false }, 2), 7, ("hello", "there"))
         print sup
         print sup.0.0.x
         print sup.0.0.x.1
@@ -620,7 +620,7 @@ fn test_nested_capture() {
             }
             ret inner_temp
         }
-        let func: fn() -> fn () -> Int = temp
+        let mut func: fn() -> fn () -> Int = temp
 
         if true {
             let capture = 7

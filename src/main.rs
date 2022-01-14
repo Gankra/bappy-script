@@ -10,27 +10,13 @@ mod parser;
 
 // The program that will be run with `cargo run`
 const MAIN_PROGRAM: &str = r#"
-    fn temp () -> fn () -> Int {
-        fn inner_temp() -> Int {
-            ret 2
-        }
-        ret inner_temp
+    let x = 1
+    let y = true
+    let z = (x, y)
+    if z.1 {
+        print add(1, add(x, 2))
     }
-    let func: fn() -> fn () -> Int = temp
-
-    if true {
-        let capture = 7
-        fn outer_capturer() -> fn () -> Int {
-            fn inner_capturer() -> Int {
-                print capture
-                ret capture
-            }
-            ret inner_capturer
-        }
-        set func = outer_capturer
-    }
-    let sub_func = func()
-    ret sub_func()
+    ret 0
 "#;
 
 fn main() {

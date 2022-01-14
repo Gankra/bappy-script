@@ -101,6 +101,7 @@ pub enum Stmt<'p> {
     Let {
         name: VarDecl<'p>,
         expr: Expression<'p>,
+        is_mut: bool,
     },
     Set {
         path: VarPath<'p>,
@@ -472,6 +473,7 @@ fn item_stmt(i: &str) -> IResult<&str, Item> {
         alt((
             stmt_break,
             stmt_continue,
+            stmt_let_mut,
             stmt_let,
             stmt_set,
             stmt_return,
@@ -490,7 +492,33 @@ fn stmt_let(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = space0(i)?;
     let (i, expr) = expr(i)?;
 
-    Ok((i, Stmt::Let { name, expr }))
+    Ok((
+        i,
+        Stmt::Let {
+            name,
+            expr,
+            is_mut: false,
+        },
+    ))
+}
+
+fn stmt_let_mut(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = tag("let mut")(i)?;
+    let (i, _) = space1(i)?;
+    let (i, name) = var_decl(i)?;
+    let (i, _) = space0(i)?;
+    let (i, _) = tag("=")(i)?;
+    let (i, _) = space0(i)?;
+    let (i, expr) = expr(i)?;
+
+    Ok((
+        i,
+        Stmt::Let {
+            name,
+            expr,
+            is_mut: true,
+        },
+    ))
 }
 
 fn stmt_set(i: &str) -> IResult<&str, Stmt> {

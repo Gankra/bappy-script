@@ -153,7 +153,7 @@ impl<'p> Program<'p> {
         {
             self.cur_eval_span = *stmt_span;
             match stmt {
-                Stmt::Let { name, expr } => {
+                Stmt::Let { name, expr, .. } => {
                     let val = self.eval_expr(expr, envs);
                     envs.last_mut().unwrap().vals.insert(name.ident, val);
                 }

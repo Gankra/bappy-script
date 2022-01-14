@@ -480,7 +480,7 @@ fn test_loops_no_looping() {
 #[test]
 fn test_loops_and_set() {
     let program = r#"
-        let x = 10
+        let mut x = 10
 
         fn remembers_original() {
             ret x
@@ -557,7 +557,7 @@ loop!
 #[test]
 fn test_set_basic() {
     let program = r#"
-        let x = 0
+        let mut x = 0
         print x
         
         set x = 3
@@ -581,7 +581,7 @@ fn test_set_basic() {
         print x
 
         // reinitialize value
-        let x = 58
+        let mut x = 58
         print x
 
         set x = 71
@@ -608,7 +608,7 @@ fn test_set_basic() {
 #[test]
 fn test_aggregates_basic() {
     let program = r#"
-        let factors: (Int, Bool) = (0, true)
+        let mut factors: (Int, Bool) = (0, true)
         print factors
         set factors = (2, false)
         print factors
@@ -618,7 +618,7 @@ fn test_aggregates_basic() {
             y: Int
         }
 
-        let pt: Point = Point { x: 0, y: 1 }
+        let mut pt: Point = Point { x: 0, y: 1 }
         print pt
         set pt = Point { x: 3, y: 4 }
         print pt
@@ -643,12 +643,12 @@ fn test_aggregates_anon_structs() {
     // In untyped mode, we can use structs without declaring them,
     // and change the type of aggregates as we please.
     let program = r#"
-        let factors = (0, true)
+        let mut factors = (0, true)
         print factors
         set factors = (2, "bye", ())
         print factors
 
-        let pt = Point { x: 0, y: 1 }
+        let mut pt = Point { x: 0, y: 1 }
         print pt
         set pt = Point { x: 3, y: true, z: "hello" }
         print pt

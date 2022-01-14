@@ -4,6 +4,18 @@ fn run_typed(input: &str) -> (i64, Option<String>) {
 
 #[test]
 #[should_panic(expected = "Compile Error")]
+fn compile_fail_set_not_mut() {
+    let program = r#"
+        let x = 0
+        set x = 2
+        ret x
+    "#;
+
+    let (_result, _output) = run_typed(program);
+}
+
+#[test]
+#[should_panic(expected = "Compile Error")]
 fn compile_fail_bad_field_1() {
     let program = r#"
         let x = true
@@ -62,7 +74,7 @@ fn compile_fail_inferred_types_enforced_1() {
             x: Int
             y: Bool
         }
-        let x = Point { x: 1, y: true }
+        let mut x = Point { x: 1, y: true }
         set x = true
         ret 0
     "#;
@@ -122,7 +134,7 @@ fn compile_fail_evil_nominal_smuggling_complex() {
             ret 0
         }
 
-        let f: fn(Point) -> Point = handle_point
+        let mut f: fn(Point) -> Point = handle_point
 
         let _: Int = handle_pointer(f, Point { x: 1, y: 3, z: 7 })
 
@@ -160,7 +172,7 @@ fn compile_fail_evil_nominal_smuggling_simple_1() {
             z: Int,
         }
 
-        let x: Point = Point { x: 1, y: 3, z: 7 }
+        let mut x: Point = Point { x: 1, y: 3, z: 7 }
         print x
 
         struct Point {
@@ -189,7 +201,7 @@ fn compile_fail_evil_nominal_smuggling_simple_2() {
             z: Int,
         }
 
-        let x: (Point, Point) = (Point { x: 1, y: 3, z: 7 }, Point { x: 2, y: 5, z: 8})
+        let mut x: (Point, Point) = (Point { x: 1, y: 3, z: 7 }, Point { x: 2, y: 5, z: 8})
         print x
 
         struct Point {
@@ -223,7 +235,7 @@ fn compile_fail_evil_nominal_smuggling_simple_3() {
             b: Point,
         }
 
-        let x: MyTuple = MyTuple { a: Point { x: 1, y: 3, z: 7 }, b: Point { x: 2, y: 5, z: 8}}
+        let mut x: MyTuple = MyTuple { a: Point { x: 1, y: 3, z: 7 }, b: Point { x: 2, y: 5, z: 8}}
         print x
 
         struct Point {
@@ -244,7 +256,7 @@ fn compile_fail_evil_nominal_smuggling_simple_3() {
 #[should_panic(expected = "Compile Error")]
 fn compile_fail_undefined_struct_1() {
     let program = r#"
-        let pt: Point = Point { x: 0, y: 1 }
+        let mut pt: Point = Point { x: 0, y: 1 }
         print pt
         set pt = Point { x: 3, y: 4 }
         print pt
@@ -282,7 +294,7 @@ fn compile_fail_undefined_struct_2() {
 #[should_panic(expected = "Compile Error")]
 fn compile_fail_undefined_struct_3() {
     let program = r#"
-        let pt: Point = Point { x: 0, y: 1 }
+        let mut pt: Point = Point { x: 0, y: 1 }
         print pt
         set pt = Point { x: 3, y: 4 }
         print pt
@@ -369,7 +381,7 @@ fn compile_fail_bad_struct_field_order() {
             y: Int
         } 
 
-        let pt: Point = Point { x: 0, y: 1 }
+        let mut pt: Point = Point { x: 0, y: 1 }
         print pt
         set pt = Point { y: 4, x: 3 }
         print pt
@@ -390,7 +402,7 @@ fn compile_fail_bad_struct_field_type() {
             y: Int
         } 
 
-        let pt: Point = Point { x: 0, y: 1 }
+        let mut pt: Point = Point { x: 0, y: 1 }
         print pt
         set pt = Point { x: 3, y: true }
         print pt
@@ -411,7 +423,7 @@ fn compile_fail_bad_struct_field_count_1() {
             y: Int
         } 
 
-        let pt: Point = Point { x: 0, y: 1 }
+        let mut pt: Point = Point { x: 0, y: 1 }
         print pt
         set pt = Point { x: 3 }
         print pt
@@ -453,7 +465,7 @@ fn compile_fail_bad_struct_dupe_field_1() {
             y: Int
         } 
 
-        let pt: Point = Point { x: 0, y: 1 }
+        let mut pt: Point = Point { x: 0, y: 1 }
         print pt
         set pt = Point { x: 3, x: 2, y: 3 }
         print pt
@@ -490,7 +502,7 @@ fn compile_fail_bad_struct_dupe_field_2() {
 #[should_panic(expected = "Compile Error")]
 fn compile_fail_bad_tuple_length_1() {
     let program = r#"
-        let factors: (Int, Bool) = (0, true)
+        let mut factors: (Int, Bool) = (0, true)
         print factors
         set factors = (2, false, 3)
         print factors
@@ -522,7 +534,7 @@ fn compile_fail_bad_tuple_length_2() {
 #[should_panic(expected = "Compile Error")]
 fn compile_fail_bad_tuple_ty() {
     let program = r#"
-        let factors: (Int, Bool) = (0, true)
+        let mut factors: (Int, Bool) = (0, true)
         print factors
         set factors = (2, 2)
         print factors
@@ -587,7 +599,7 @@ fn compile_fail_scoping_3() {
 #[should_panic(expected = "Compile Error")]
 fn compile_fail_set_capture() {
     let program = r#"
-        let captured: Int = 3
+        let mut captured: Int = 3
         fn captures_state() {
             set captured = 4
         }
@@ -667,7 +679,7 @@ fn compile_fail_let_ty() {
 #[should_panic(expected = "Compile Error")]
 fn compile_fail_set_ty() {
     let program = r#"
-        let x: Int = 0
+        let mut x: Int = 0
         set x = ()
         ret 0
     "#;

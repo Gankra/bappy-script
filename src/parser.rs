@@ -209,7 +209,7 @@ impl fmt::Debug for Builtin {
 impl<'p> Program<'p> {
     pub fn parse(&mut self) -> IResult<&'p str, ()> {
         let (i, (Block(stmts), terminal)) = self.parse_block(self.input)?;
-        self.main = Some(Function {
+        self.ast_main = Some(Function {
             name: "main",
             args: Vec::new(),
             stmts,

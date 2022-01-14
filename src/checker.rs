@@ -79,9 +79,10 @@ pub type TyIdx = usize;
 /// `ty_map` stores all the *structural* Tys we've seen before (everything that
 /// *isn't* TyName::Named), ensuring two structural types have the same TyIdx.
 /// i.e. `(Bool, Int)` will have the same TyIdx everywhere it occurs.
-struct TyCtx<'p> {
+#[derive(Debug)]
+pub struct TyCtx<'p> {
     /// Whether static types are enabled/enforced.
-    is_typed: bool,
+    pub is_typed: bool,
     /// The list of every known type.
     ///
     /// These are the "canonical" copies of each type. Types are
@@ -112,9 +113,9 @@ struct TyCtx<'p> {
     /// at this point in the program.
     envs: Vec<CheckEnv<'p>>,
     /// The absence of a type annotation, saved for easy comparison.
-    ty_unknown: TyIdx,
+    pub ty_unknown: TyIdx,
     /// The empty tuple, saved for easy use.
-    ty_empty: TyIdx,
+    pub ty_empty: TyIdx,
 }
 
 /// Information about types for a specific scope.
@@ -151,7 +152,7 @@ pub struct Reg {
 }
 
 #[derive(Debug, Clone)]
-enum Var {
+pub enum Var {
     /// A variable that is an alloca (*T)
     Alloca { ty: TyIdx, reg: RegIdx },
     /// A variable that is a value (T)
@@ -374,6 +375,10 @@ impl<'p> TyCtx<'p> {
                     let arg = self.format_ty(*arg_ty_idx);
                     write!(f, "{}", arg).unwrap();
                 }
+                // Try to visually distinguish the single-element-tuple
+                if arg_tys.len() == 1 {
+                    write!(f, ",").unwrap();
+                }
                 write!(f, ")").unwrap();
                 f
             }
@@ -417,6 +422,7 @@ impl<'p> Program<'p> {
             funcs: Vec::new(),
             nominals: Vec::new(),
             func_stack: Vec::new(),
+            main: GlobalFuncIdx(0), // Dummy value
         };
 
         // Cache some key types
@@ -451,8 +457,10 @@ impl<'p> Program<'p> {
         let mut captures = Vec::new();
 
         // Time to start analyzing!!
-        let mut main = self.main.take().unwrap();
-        self.check_func(&mut main, &mut ctx, &mut cfg, &mut captures);
+        let mut ast_main = self.ast_main.take().unwrap();
+        let (main_idx, _main_ty) =
+            self.check_func(&mut ast_main, &mut ctx, &mut cfg, &mut captures);
+        cfg.main = main_idx;
 
         if ctx.envs.len() != 1 {
             self.error(
@@ -468,9 +476,10 @@ impl<'p> Program<'p> {
             cfg.func_stack.is_empty(),
             "Internal Compiler Error: Funcs were not popped!"
         );
-        println!();
-        cfg.print(&ctx);
-        self.main = Some(main);
+
+        self.ast_main = Some(ast_main);
+        self.cfg = Some(cfg);
+        self.ctx = Some(ctx);
     }
 
     /// Analyze/Compile a function
@@ -685,6 +694,11 @@ impl<'p> Program<'p> {
                 Stmt::Loop { stmts } => {
                     let loop_bb = cfg.push_basic_block();
                     let post_loop_bb = cfg.push_basic_block();
+
+                    cfg.bb(bb).stmts.push(CfgStmt::Jump(BasicBlockJmp {
+                        block_id: loop_bb,
+                        args: Vec::new(),
+                    }));
 
                     cfg.push_loop(loop_bb, post_loop_bb);
                     let final_loop_bb = self.check_block(
@@ -1211,33 +1225,51 @@ NOTE: the types look the same, but the named types have different decls!"#,
     }
 }
 
-struct Cfg<'p> {
-    funcs: Vec<FuncCfg<'p>>,
-    nominals: Vec<TyIdx>,
+/// An SSA CFG IR (Single Static Assignment Control Flow Graph Intermediate Representation).
+///
+/// This is the preferred format for writing analysis steps after basic type checking
+/// and name resolution.
+#[derive(Debug)]
+pub struct Cfg<'p> {
+    /// All the functions, including builtins and main.
+    pub funcs: Vec<FuncCfg<'p>>,
+    /// All the named types.
+    pub nominals: Vec<TyIdx>,
+    /// The main function.
+    pub main: GlobalFuncIdx,
 
+    // Transient state, only used while building the CFG
     func_stack: Vec<GlobalFuncIdx>,
 }
 
-struct FuncCfg<'p> {
-    func_name: &'p str,
-    func_arg_names: Vec<&'p str>,
-    func_ty: TyIdx,
+#[derive(Debug)]
+pub struct FuncCfg<'p> {
+    pub func_name: &'p str,
+    pub func_arg_names: Vec<&'p str>,
+    pub func_ty: TyIdx,
+
+    pub blocks: Vec<BasicBlock<'p>>,
+    pub regs: Vec<RegDecl>,
+
+    // Transient state, only used while building the CFG
     // (loop_bb, post_loop_bb)
     loops: Vec<(BasicBlockIdx, BasicBlockIdx)>,
-    blocks: Vec<BasicBlock<'p>>,
-    regs: Vec<RegDecl>,
 }
 
-struct BasicBlock<'p> {
-    args: Vec<RegIdx>,
-    stmts: Vec<CfgStmt<'p>>,
+#[derive(Debug)]
+pub struct BasicBlock<'p> {
+    pub args: Vec<RegIdx>,
+    pub stmts: Vec<CfgStmt<'p>>,
 }
 
-struct BasicBlockJmp {
-    block_id: BasicBlockIdx,
-    args: Vec<RegIdx>,
+#[derive(Debug)]
+pub struct BasicBlockJmp {
+    pub block_id: BasicBlockIdx,
+    pub args: Vec<RegIdx>,
 }
-enum CfgStmt<'p> {
+
+#[derive(Debug)]
+pub enum CfgStmt<'p> {
     Branch {
         cond: RegIdx,
         if_block: BasicBlockJmp,
@@ -1289,15 +1321,16 @@ enum CfgStmt<'p> {
 }
 
 #[derive(Debug, Copy, Clone)]
-struct RegIdx(usize);
+pub struct RegIdx(usize);
 #[derive(Debug, Copy, Clone)]
-struct BasicBlockIdx(usize);
+pub struct BasicBlockIdx(usize);
 #[derive(Debug, Copy, Clone)]
-struct GlobalFuncIdx(usize);
+pub struct GlobalFuncIdx(usize);
 #[derive(Debug, Copy, Clone)]
-struct GlobalNominalIdx(usize);
+pub struct GlobalNominalIdx(usize);
 
-struct RegDecl {
+#[derive(Debug)]
+pub struct RegDecl {
     ty: TyIdx,
 }
 
@@ -1370,56 +1403,74 @@ impl<'p> Cfg<'p> {
         GlobalNominalIdx(self.nominals.len() - 1)
     }
 
-    fn print(&self, ctx: &TyCtx<'p>) {
+    pub fn format(&self, ctx: &TyCtx<'p>) -> Result<String, std::fmt::Error> {
+        let mut f = String::new();
         for (nominal_ty_idx, nominal_ty) in self.nominals.iter().enumerate() {
             if let Ty::NamedStruct(struct_ty) = ctx.realize_ty(*nominal_ty) {
-                println!("#struct{}_{} {{", nominal_ty_idx, struct_ty.name);
+                writeln!(f, "#struct{}_{} {{", nominal_ty_idx, struct_ty.name)?;
                 for field in &struct_ty.fields {
-                    println!("  {}: {}", field.ident, ctx.format_ty(field.ty));
+                    writeln!(f, "  {}: {}", field.ident, ctx.format_ty(field.ty))?;
                 }
-                println!("}}");
-                println!();
+                writeln!(f, "}}")?;
+                writeln!(f)?;
             } else {
                 unreachable!("Internal Compile Error: Unknown nominal type?");
             }
         }
 
         for (func_idx, func) in self.funcs.iter().enumerate() {
-            print!("#fn{}_{}(", func_idx, func.func_name);
-            if !func.blocks.is_empty() {
+            if func.blocks.is_empty() {
+                // No blocks means this is an intrinsics
+                write!(f, "[intrinsic] #fn{}_{}(", func_idx, func.func_name)?;
+                for (arg_idx, arg) in func.func_arg_names.iter().enumerate() {
+                    if arg_idx != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", arg)?;
+                }
+                writeln!(f, ")")?;
+            } else {
+                writeln!(f,)?;
+                write!(f, "#fn{}_{}(", func_idx, func.func_name)?;
                 let arg_regs = func.blocks[0].args.iter();
                 let arg_names = func.func_arg_names.iter().chain(Some(&"[closure]"));
                 for (arg_idx, (arg_reg_idx, arg_name)) in arg_regs.zip(arg_names).enumerate() {
                     if arg_idx != 0 {
-                        print!(", ");
+                        write!(f, ", ")?;
                     }
                     let arg_reg = &func.regs[arg_reg_idx.0];
-                    print!(
+                    write!(
+                        f,
                         "%{}_{}: {}",
                         arg_reg_idx.0,
                         arg_name,
                         ctx.format_ty(arg_reg.ty)
-                    );
+                    )?;
                 }
+                writeln!(f, "):")?;
+                func.format(&mut f, ctx, self)?;
             }
-            println!("):");
-            func.print(ctx, self);
-            println!();
         }
+        Ok(f)
     }
 }
 
 impl<'p> FuncCfg<'p> {
-    fn print(&self, ctx: &TyCtx<'p>, cfg: &Cfg<'p>) {
+    fn format<F: std::fmt::Write>(
+        &self,
+        f: &mut F,
+        ctx: &TyCtx<'p>,
+        cfg: &Cfg<'p>,
+    ) -> std::fmt::Result {
         for (block_id, block) in self.blocks.iter().enumerate() {
-            print!("  bb{}(", block_id);
+            write!(f, "  bb{}(", block_id)?;
             for (arg_idx, arg) in block.args.iter().enumerate() {
                 if arg_idx != 0 {
-                    print!(", ");
+                    write!(f, ", ")?;
                 }
-                print!("%{}", arg.0);
+                write!(f, "%{}", arg.0)?;
             }
-            println!("):");
+            writeln!(f, "):")?;
 
             for stmt in &block.stmts {
                 match stmt {
@@ -1428,16 +1479,16 @@ impl<'p> FuncCfg<'p> {
                         if_block,
                         else_block,
                     } => {
-                        print!("    cond %{}: ", cond.0);
-                        if_block.print();
-                        print!(", ");
-                        else_block.print();
-                        println!();
+                        write!(f, "    cond %{}: ", cond.0)?;
+                        if_block.format(f)?;
+                        write!(f, ", ")?;
+                        else_block.format(f)?;
+                        writeln!(f)?;
                     }
                     CfgStmt::Jump(block) => {
-                        print!("    jmp ");
-                        block.print();
-                        println!();
+                        write!(f, "    jmp ")?;
+                        block.format(f)?;
+                        writeln!(f)?;
                     }
                     CfgStmt::RegFromVarPath {
                         new_reg,
@@ -1446,26 +1497,27 @@ impl<'p> FuncCfg<'p> {
                     } => {
                         match src_var {
                             Var::Reg { reg, .. } => {
-                                print!("    %{} = (%{})", new_reg.0, reg.0);
+                                write!(f, "    %{} = (%{})", new_reg.0, reg.0)?;
                             }
                             Var::Alloca { reg, .. } => {
-                                print!("    %{} = (*%{})", new_reg.0, reg.0);
+                                write!(f, "    %{} = (*%{})", new_reg.0, reg.0)?;
                             }
                             Var::GlobalFunc { global_func, .. } => {
                                 let func = &cfg.funcs[global_func.0];
-                                print!(
+                                write!(
+                                    f,
                                     "    %{} = #fn{}_{}",
                                     new_reg.0, global_func.0, func.func_name
-                                );
+                                )?;
                             }
                         }
                         for field in var_path {
-                            print!(".{}", field);
+                            write!(f, ".{}", field)?;
                         }
-                        println!();
+                        writeln!(f)?;
                     }
                     CfgStmt::RegFromLit { new_reg, lit } => {
-                        println!("    %{} = {:?}", new_reg.0, lit);
+                        writeln!(f, "    %{} = {:?}", new_reg.0, lit)?;
                     }
                     CfgStmt::RegFromClosure {
                         new_reg,
@@ -1473,17 +1525,18 @@ impl<'p> FuncCfg<'p> {
                         captures,
                     } => {
                         let func = &cfg.funcs[global_func.0];
-                        print!(
+                        write!(
+                            f,
                             "    %{} = [closure](#fn{}_{}, (",
                             new_reg.0, global_func.0, func.func_name
-                        );
+                        )?;
                         for (capture_idx, capture) in captures.iter().enumerate() {
                             if capture_idx != 0 {
-                                print!(", ");
+                                write!(f, ", ")?;
                             }
-                            print!("%{}", capture.0);
+                            write!(f, "%{}", capture.0)?;
                         }
-                        println!("))");
+                        writeln!(f, "))")?;
                     }
                     CfgStmt::Call {
                         new_reg,
@@ -1492,29 +1545,30 @@ impl<'p> FuncCfg<'p> {
                     } => {
                         match func {
                             Var::Reg { reg, .. } => {
-                                print!("    %{} = (%{})(", new_reg.0, reg.0);
+                                write!(f, "    %{} = (%{})(", new_reg.0, reg.0)?;
                             }
                             Var::Alloca { reg, .. } => {
-                                print!("    %{} = (*%{})(", new_reg.0, reg.0);
+                                write!(f, "    %{} = (*%{})(", new_reg.0, reg.0)?;
                             }
                             Var::GlobalFunc { global_func, .. } => {
                                 let func = &cfg.funcs[global_func.0];
-                                print!(
+                                write!(
+                                    f,
                                     "    %{} = #fn{}_{}(",
                                     new_reg.0, global_func.0, func.func_name
-                                );
+                                )?;
                             }
                         }
                         for (arg_idx, arg) in args.iter().enumerate() {
                             if arg_idx != 0 {
-                                print!(", ");
+                                write!(f, ", ")?;
                             }
-                            print!("%{}", arg.0);
+                            write!(f, "%{}", arg.0)?;
                         }
-                        println!(")");
+                        writeln!(f, ")")?;
                     }
                     CfgStmt::Alloca { new_reg } => {
-                        println!("    %{} = alloca()", new_reg.0);
+                        writeln!(f, "    %{} = alloca()", new_reg.0)?;
                     }
                     CfgStmt::Set {
                         dest_var,
@@ -1522,30 +1576,30 @@ impl<'p> FuncCfg<'p> {
                         var_path,
                     } => {
                         if let Var::Alloca { reg, .. } = dest_var {
-                            print!("    (*%{})", reg.0);
+                            write!(f, "    (*%{})", reg.0)?;
                             for field in var_path {
-                                print!(".{}", field);
+                                write!(f, ".{}", field)?;
                             }
-                            println!(" = %{}", src_reg.0);
+                            writeln!(f, " = %{}", src_reg.0)?;
                         } else {
                             panic!("Internal Compiler Error: set a non-alloca?");
                         }
                     }
                     CfgStmt::Return { src_reg } => {
-                        println!("    ret %{}", src_reg.0);
+                        writeln!(f, "    ret %{}", src_reg.0)?;
                     }
                     CfgStmt::Print { src_reg } => {
-                        println!("    print %{}", src_reg.0);
+                        writeln!(f, "    print %{}", src_reg.0)?;
                     }
                     CfgStmt::Tuple { new_reg, args } => {
-                        print!("    %{} = (", new_reg.0);
+                        write!(f, "    %{} = (", new_reg.0)?;
                         for (arg_idx, arg) in args.iter().enumerate() {
                             if arg_idx != 0 {
-                                print!(", ");
+                                write!(f, ", ")?;
                             }
-                            print!("%{}", arg.0);
+                            write!(f, "%{}", arg.0)?;
                         }
-                        println!(")");
+                        writeln!(f, ")")?;
                     }
                     CfgStmt::Struct {
                         nominal,
@@ -1555,37 +1609,40 @@ impl<'p> FuncCfg<'p> {
                         let ty_idx = cfg.nominals[nominal.0];
                         let ty = ctx.realize_ty(ty_idx);
                         if let Ty::NamedStruct(struct_decl) = ty {
-                            print!(
+                            write!(
+                                f,
                                 "    %{} = #struct{}_{}{{ ",
                                 new_reg.0, nominal.0, struct_decl.name
-                            );
+                            )?;
                             for (field_idx, (field_name, field_reg)) in fields.iter().enumerate() {
                                 if field_idx != 0 {
-                                    print!(", ");
+                                    write!(f, ", ")?;
                                 }
-                                print!("{}: %{}", field_name, field_reg.0);
+                                write!(f, "{}: %{}", field_name, field_reg.0)?;
                             }
-                            println!(" }}");
+                            writeln!(f, " }}")?;
                         } else {
                             panic!("Internal Compiler Error: struct wasn't a struct?");
                         }
                     }
                 }
             }
-            println!();
+            writeln!(f)?;
         }
+        Ok(())
     }
 }
 
 impl BasicBlockJmp {
-    fn print(&self) {
-        print!("bb{}(", self.block_id.0);
+    fn format<F: std::fmt::Write>(&self, f: &mut F) -> std::fmt::Result {
+        write!(f, "bb{}(", self.block_id.0)?;
         for (arg_idx, arg) in self.args.iter().enumerate() {
             if arg_idx != 0 {
-                print!(", ");
+                write!(f, ", ")?;
             }
-            print!("%{}", arg.0);
+            write!(f, "%{}", arg.0)?;
         }
-        print!(")");
+        write!(f, ")")?;
+        Ok(())
     }
 }

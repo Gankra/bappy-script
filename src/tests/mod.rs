@@ -7,3 +7,5 @@ mod typed_compile_fail;
 mod typed_parse_fail;
 mod typed_run_fail;
 mod typed_run_pass;
+
+mod cfg_snaps;

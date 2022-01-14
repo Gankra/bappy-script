@@ -1,3 +1,4 @@
+use checker::*;
 use interpretter::*;
 use parser::*;
 
@@ -7,6 +8,7 @@ mod tests;
 mod checker;
 mod interpretter;
 mod parser;
+mod passes;
 
 // The program that will be run with `cargo run`
 const MAIN_PROGRAM: &str = r#"
@@ -68,7 +70,7 @@ fn main() {
 /// These 3 functions should be called in sequence. If I was being a try-hard
 /// I would create 4 or 5 separate "Program" types that change between each
 /// phase to require things be called in order, but I'm not feeling it.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Program<'p> {
     /// Should we use static types?
     typed: bool,
@@ -79,7 +81,12 @@ struct Program<'p> {
     input_lines: Vec<(usize, &'p str)>,
 
     /// Fully parsed `main`. Technically "The AST".
-    main: Option<Function<'p>>,
+    ast_main: Option<Function<'p>>,
+
+    /// Fully constructed typing context
+    ctx: Option<TyCtx<'p>>,
+    /// Fully constructed SSA CFG (control flow graph)
+    cfg: Option<Cfg<'p>>,
 
     /// Builtin functions ("the stdlib")
     builtins: Vec<Builtin>,
@@ -112,7 +119,9 @@ impl<'p> Program<'p> {
             typed: true,
             input,
             input_lines: Vec::new(),
-            main: None,
+            ast_main: None,
+            cfg: None,
+            ctx: None,
             builtins: builtins(),
             output: Some(String::new()),
             cur_eval_span: Span {
@@ -136,11 +145,25 @@ impl<'p> Program<'p> {
                 },
             )
         }
+        println!();
         println!("parsed!\n");
 
         println!("checking...");
         self.check();
+        println!();
+        println!(
+            "{}",
+            self.cfg
+                .as_ref()
+                .unwrap()
+                .format(self.ctx.as_ref().unwrap())
+                .unwrap()
+        );
         println!("checked!\n");
+
+        println!("running compiler passes...");
+        self.run_passes();
+        println!("compiled!\n");
 
         println!("evaling...");
         let out = self.eval();

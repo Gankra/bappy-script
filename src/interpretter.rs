@@ -54,7 +54,7 @@ impl<'p> Program<'p> {
             .map(|builtin| (builtin.name, Val::Builtin(builtin.clone())))
             .collect();
 
-        let main = self.main.take().unwrap();
+        let main = self.ast_main.take().unwrap();
         let mut envs = vec![Env { vals: builtins }];
         let out = self.eval_func(&main, Vec::new(), HashMap::new(), &mut envs);
 
@@ -69,7 +69,7 @@ impl<'p> Program<'p> {
         }
 
         if let Val::Int(int) = out {
-            self.main = Some(main);
+            self.ast_main = Some(main);
             int
         } else {
             self.error(

@@ -47,7 +47,7 @@ pub enum ControlFlow<'e, 'p> {
 
 impl<'p> Program<'p> {
     /// Run the program!
-    pub fn eval(&mut self) -> i64 {
+    pub fn eval_ast(&mut self) -> i64 {
         let builtins = self
             .builtins
             .iter()
@@ -56,7 +56,7 @@ impl<'p> Program<'p> {
 
         let main = self.ast_main.take().unwrap();
         let mut envs = vec![Env { vals: builtins }];
-        let out = self.eval_func(&main, Vec::new(), HashMap::new(), &mut envs);
+        let out = self.eval_func_ast(&main, Vec::new(), HashMap::new(), &mut envs);
 
         if envs.len() != 1 {
             self.error(
@@ -79,7 +79,7 @@ impl<'p> Program<'p> {
         }
     }
 
-    fn eval_func<'e>(
+    fn eval_func_ast<'e>(
         &mut self,
         func: &'e Function<'p>,
         args: Vec<Val<'e, 'p>>,
@@ -115,7 +115,7 @@ impl<'p> Program<'p> {
         vals.extend(captures.into_iter());
 
         envs.push(Env { vals });
-        let result = self.eval_block(&func.stmts, envs);
+        let result = self.eval_block_ast(&func.stmts, envs);
         envs.pop();
 
         match result {
@@ -138,7 +138,7 @@ impl<'p> Program<'p> {
         }
     }
 
-    fn eval_block<'e>(
+    fn eval_block_ast<'e>(
         &mut self,
         stmts: &'e [Statement<'p>],
         envs: &mut Vec<Env<'e, 'p>>,
@@ -154,14 +154,14 @@ impl<'p> Program<'p> {
             self.cur_eval_span = *stmt_span;
             match stmt {
                 Stmt::Let { name, expr, .. } => {
-                    let val = self.eval_expr(expr, envs);
+                    let val = self.eval_expr_ast(expr, envs);
                     envs.last_mut().unwrap().vals.insert(name.ident, val);
                 }
                 Stmt::Set {
                     path: var_path,
                     expr,
                 } => {
-                    let val = self.eval_expr(expr, envs);
+                    let val = self.eval_expr_ast(expr, envs);
 
                     let base_val = self.eval_resolve_var(var_path.ident, envs);
                     let sub_val = self.eval_resolve_var_path(base_val, &var_path.fields, expr.span);
@@ -187,9 +187,9 @@ impl<'p> Program<'p> {
                     stmts,
                     else_stmts,
                 } => {
-                    let result = match self.eval_expr(expr, envs) {
-                        Val::Bool(true) => self.eval_block(stmts, envs),
-                        Val::Bool(false) => self.eval_block(else_stmts, envs),
+                    let result = match self.eval_expr_ast(expr, envs) {
+                        Val::Bool(true) => self.eval_block_ast(stmts, envs),
+                        Val::Bool(false) => self.eval_block_ast(else_stmts, envs),
                         val => {
                             let val = self.format_val(&val, true, 0);
                             self.error(
@@ -210,7 +210,7 @@ impl<'p> Program<'p> {
                 }
                 Stmt::Loop { stmts } => {
                     loop {
-                        let result = self.eval_block(stmts, envs);
+                        let result = self.eval_block_ast(stmts, envs);
                         match result {
                             ControlFlow::Return(val) => {
                                 envs.pop();
@@ -223,11 +223,11 @@ impl<'p> Program<'p> {
                     }
                 }
                 Stmt::Print { expr } => {
-                    let val = self.eval_expr(expr, envs);
+                    let val = self.eval_expr_ast(expr, envs);
                     self.print_val(&val);
                 }
                 Stmt::Ret { expr } => {
-                    let val = self.eval_expr(expr, envs);
+                    let val = self.eval_expr_ast(expr, envs);
                     envs.pop();
                     return ControlFlow::Return(val);
                 }
@@ -247,7 +247,11 @@ impl<'p> Program<'p> {
         ControlFlow::None
     }
 
-    fn eval_expr<'e>(&mut self, expr: &Expression<'p>, envs: &mut Vec<Env<'e, 'p>>) -> Val<'e, 'p> {
+    fn eval_expr_ast<'e>(
+        &mut self,
+        expr: &Expression<'p>,
+        envs: &mut Vec<Env<'e, 'p>>,
+    ) -> Val<'e, 'p> {
         self.cur_eval_span = expr.span;
         match &expr.code {
             Expr::Call {
@@ -255,13 +259,16 @@ impl<'p> Program<'p> {
                 args,
             } => {
                 let func = self.eval_resolve_var(func_name, envs).clone();
-                let evaled_args = args.iter().map(|expr| self.eval_expr(expr, envs)).collect();
+                let evaled_args = args
+                    .iter()
+                    .map(|expr| self.eval_expr_ast(expr, envs))
+                    .collect();
 
                 match func {
                     Val::Func(closure) => {
-                        self.eval_func(closure.func, evaled_args, closure.captures, envs)
+                        self.eval_func_ast(closure.func, evaled_args, closure.captures, envs)
                     }
-                    Val::Builtin(builtin) => (builtin.func)(&evaled_args),
+                    Val::Builtin(builtin) => (builtin.ast_impl)(&evaled_args),
                     _ => {
                         let val = self.format_val(&func, true, 0);
                         self.error(
@@ -275,13 +282,16 @@ impl<'p> Program<'p> {
                 }
             }
             Expr::Tuple(args) => {
-                let evaled_args = args.iter().map(|arg| self.eval_expr(arg, envs)).collect();
+                let evaled_args = args
+                    .iter()
+                    .map(|arg| self.eval_expr_ast(arg, envs))
+                    .collect();
                 Val::Tuple(evaled_args)
             }
             Expr::Named { name, args } => {
                 let evaled_fields = args
                     .iter()
-                    .map(|(field, expr)| (*field, self.eval_expr(expr, envs)))
+                    .map(|(field, expr)| (*field, self.eval_expr_ast(expr, envs)))
                     .collect();
                 Val::Struct(name, evaled_fields)
             }
@@ -487,7 +497,7 @@ impl<'p> Program<'p> {
 //
 //
 
-fn builtin_add<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+pub fn ast_builtin_add<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     assert!(
         args.len() == 2,
         "Runtime Error: Builtin add had wrong number of args"
@@ -499,7 +509,7 @@ fn builtin_add<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     }
 }
 
-fn builtin_mul<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+pub fn ast_builtin_mul<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     assert!(
         args.len() == 2,
         "Runtime Error: Builtin mul had wrong number of args"
@@ -511,7 +521,7 @@ fn builtin_mul<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     }
 }
 
-fn builtin_sub<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+pub fn ast_builtin_sub<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     assert!(
         args.len() == 2,
         "Runtime Error: Builtin sub had wrong number of args"
@@ -523,7 +533,7 @@ fn builtin_sub<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     }
 }
 
-fn builtin_eq<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+pub fn ast_builtin_eq<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     assert!(
         args.len() == 2,
         "Runtime Error: Builtin eq had wrong number of args"
@@ -539,7 +549,7 @@ fn builtin_eq<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     }
 }
 
-fn builtin_not<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
+pub fn ast_builtin_not<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     assert!(
         args.len() == 1,
         "Runtime Error: Builtin not had wrong number of args"
@@ -549,54 +559,4 @@ fn builtin_not<'e, 'p>(args: &[Val<'e, 'p>]) -> Val<'e, 'p> {
     } else {
         panic!("Runtime Error: Builtin sub had wrong type of args")
     }
-}
-
-pub fn builtins() -> Vec<Builtin> {
-    vec![
-        Builtin {
-            name: "add",
-            args: &["lhs", "rhs"],
-            ty: TyName::Func {
-                arg_tys: vec![TyName::Int, TyName::Int],
-                return_ty: Box::new(TyName::Int),
-            },
-            func: builtin_add,
-        },
-        Builtin {
-            name: "sub",
-            args: &["lhs", "rhs"],
-            ty: TyName::Func {
-                arg_tys: vec![TyName::Int, TyName::Int],
-                return_ty: Box::new(TyName::Int),
-            },
-            func: builtin_sub,
-        },
-        Builtin {
-            name: "mul",
-            args: &["lhs", "rhs"],
-            ty: TyName::Func {
-                arg_tys: vec![TyName::Int, TyName::Int],
-                return_ty: Box::new(TyName::Int),
-            },
-            func: builtin_mul,
-        },
-        Builtin {
-            name: "eq",
-            args: &["lhs", "rhs"],
-            ty: TyName::Func {
-                arg_tys: vec![TyName::Int, TyName::Int],
-                return_ty: Box::new(TyName::Bool),
-            },
-            func: builtin_eq,
-        },
-        Builtin {
-            name: "not",
-            args: &["rhs"],
-            ty: TyName::Func {
-                arg_tys: vec![TyName::Bool],
-                return_ty: Box::new(TyName::Bool),
-            },
-            func: builtin_not,
-        },
-    ]
 }

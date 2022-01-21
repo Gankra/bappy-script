@@ -1,55 +1,41 @@
 use checker::*;
-use interpretter::*;
+use interpretter_ast::*;
+use interpretter_cfg::*;
 use parser::*;
 
 #[cfg(test)]
 mod tests;
 
 mod checker;
-mod interpretter;
+mod interpretter_ast;
+mod interpretter_cfg;
 mod parser;
 mod passes;
 
 // The program that will be run with `cargo run`
 const MAIN_PROGRAM: &str = r#"
-    struct Point {
-        x: Int,
-        y: Int,
-    }
-    
-    let pt = Point { x: 2, y: 7 }
-    fn captures(arg: Int) -> Int {
-        ret add(arg, pt.y)
-    }
+struct Point {
+    x: Int
+    y: Int
+}
 
-    fn no_captures(arg: Int) -> Int {
-        ret add(arg, arg)
-    }
+fn square(x:Int)->Int{
+    ret mul(x, x)
+}
 
-    fn calls_funcs() -> Int {
-        let a = captures(23)
-        let b = no_captures(29)
-        ret add(a, b)
-    }
+let pt = Point { x: 1, y: 3 }
+let z = 5
 
-    let my_fn = captures
-    let my_fn2 = no_captures
+fn captures() -> Int {
+    ret add(square(pt.x), square(pt.y))
+}
+fn super_captures() -> Int {
+    ret sub(captures(), z)
+}
 
-    print captures(2)
-    print my_fn(3)
-
-    print no_captures(6)
-    print my_fn2(7)
-
-    print calls_funcs()
-
-    let x = 1
-    let y = true
-    let z = (x, y)
-    if z.1 {
-        print add(1, add(x, 2))
-    }
-    ret 0
+print captures()
+print super_captures()
+ret 0
 "#;
 
 fn main() {
@@ -95,6 +81,16 @@ struct Program<'p> {
     output: Option<String>,
     /// Hacky state to help the interpretter give better error lines
     cur_eval_span: Span,
+}
+
+#[derive(Clone)]
+pub struct Builtin {
+    pub name: &'static str,
+    pub args: &'static [&'static str],
+    pub ty: TyName<'static>,
+    pub layout: FrameLayout,
+    pub ast_impl: for<'e, 'p> fn(args: &[Val<'e, 'p>]) -> Val<'e, 'p>,
+    pub cfg_impl: fn(&mut CfgInterpretter) -> (),
 }
 
 impl<'p> Program<'p> {
@@ -166,7 +162,11 @@ impl<'p> Program<'p> {
         println!("compiled!\n");
 
         println!("evaling...");
-        let out = self.eval();
+        let out = if self.typed {
+            self.eval_cfg()
+        } else {
+            self.eval_ast()
+        };
         println!("evaled! {}", out);
 
         (out, self.output)
@@ -226,4 +226,94 @@ impl<'p> Program<'p> {
 /// every phase of the compiler.
 pub fn addr(input: &str) -> usize {
     input.as_ptr() as usize
+}
+
+pub fn builtins() -> Vec<Builtin> {
+    vec![
+        Builtin {
+            name: "add",
+            args: &["lhs", "rhs"],
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Int, TyName::Int],
+                return_ty: Box::new(TyName::Int),
+            },
+            layout: FrameLayout {
+                frame_size: 0,
+                args_size: 24,
+                reg_offsets: vec![16, 24],
+                reg_sizes: vec![8, 8],
+                return_offset: 8,
+            },
+            ast_impl: ast_builtin_add,
+            cfg_impl: cfg_builtin_add,
+        },
+        Builtin {
+            name: "sub",
+            args: &["lhs", "rhs"],
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Int, TyName::Int],
+                return_ty: Box::new(TyName::Int),
+            },
+            layout: FrameLayout {
+                frame_size: 0,
+                args_size: 24,
+                reg_offsets: vec![16, 24],
+                reg_sizes: vec![8, 8],
+                return_offset: 8,
+            },
+            ast_impl: ast_builtin_sub,
+            cfg_impl: cfg_builtin_sub,
+        },
+        Builtin {
+            name: "mul",
+            args: &["lhs", "rhs"],
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Int, TyName::Int],
+                return_ty: Box::new(TyName::Int),
+            },
+            layout: FrameLayout {
+                frame_size: 0,
+                args_size: 24,
+                reg_offsets: vec![16, 24],
+                reg_sizes: vec![8, 8],
+                return_offset: 8,
+            },
+            ast_impl: ast_builtin_mul,
+            cfg_impl: cfg_builtin_mul,
+        },
+        Builtin {
+            name: "eq",
+            args: &["lhs", "rhs"],
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Int, TyName::Int],
+                return_ty: Box::new(TyName::Bool),
+            },
+            layout: FrameLayout {
+                frame_size: 0,
+                args_size: 24,
+                reg_offsets: vec![16, 24],
+                reg_sizes: vec![8, 8],
+                return_offset: 8,
+            },
+            ast_impl: ast_builtin_eq,
+            cfg_impl: cfg_builtin_eq,
+        },
+        Builtin {
+            name: "not",
+            args: &["rhs"],
+            ty: TyName::Func {
+                arg_tys: vec![TyName::Bool],
+                return_ty: Box::new(TyName::Bool),
+            },
+            layout: FrameLayout {
+                frame_size: 0,
+                args_size: 8,
+                reg_offsets: vec![8],
+                reg_sizes: vec![1],
+                return_offset: 7,
+            },
+            ast_impl: ast_builtin_not,
+            cfg_impl: cfg_builtin_not,
+        },
+    ]
 }

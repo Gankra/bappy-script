@@ -192,14 +192,6 @@ enum StructItem<'p> {
 
 struct Block<'p>(Vec<Statement<'p>>);
 
-#[derive(Clone)]
-pub struct Builtin {
-    pub name: &'static str,
-    pub args: &'static [&'static str],
-    pub ty: TyName<'static>,
-    pub func: for<'e, 'p> fn(args: &[Val<'e, 'p>]) -> Val<'e, 'p>,
-}
-
 impl fmt::Debug for Builtin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("<builtin>")

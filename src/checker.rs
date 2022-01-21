@@ -22,6 +22,8 @@ pub enum Ty<'p> {
     Int,
     Str,
     Bool,
+    Ptr,
+    TypedPtr(TyIdx),
     Empty,
     Func {
         arg_tys: Vec<TyIdx>,
@@ -92,7 +94,7 @@ pub struct TyCtx<'p> {
     /// Types should be compared by checking if they have the same
     /// TyIdx. This allows you to properly compare nominal types
     /// in the face of shadowing and similar situations.
-    tys: Vec<Ty<'p>>,
+    pub tys: Vec<Ty<'p>>,
 
     /// Mappings from structural types we've seen to type indices.
     ///
@@ -112,10 +114,12 @@ pub struct TyCtx<'p> {
     /// If nothing is found, that type name / variable name is undefined
     /// at this point in the program.
     envs: Vec<CheckEnv<'p>>,
-    /// The absence of a type annotation, saved for easy comparison.
+    /// Builtin primitive types, for easy lookup.
     pub ty_unknown: TyIdx,
-    /// The empty tuple, saved for easy use.
     pub ty_empty: TyIdx,
+    pub ty_bool: TyIdx,
+    pub ty_int: TyIdx,
+    pub ty_ptr: TyIdx,
 }
 
 /// Information about types for a specific scope.
@@ -177,7 +181,7 @@ impl Var {
         Self::GlobalFunc { ty, global_func }
     }
 
-    fn ty(&self) -> TyIdx {
+    pub fn ty(&self) -> TyIdx {
         match *self {
             Var::Alloca { ty, .. } => ty,
             Var::Reg { ty, .. } => ty,
@@ -346,7 +350,7 @@ impl<'p> TyCtx<'p> {
     }
 
     /// Get the type-structure (Ty) associated with this type id (TyIdx).
-    fn realize_ty(&self, ty: TyIdx) -> &Ty<'p> {
+    pub fn realize_ty(&self, ty: TyIdx) -> &Ty<'p> {
         if self.is_typed {
             self.tys
                 .get(ty)
@@ -357,13 +361,19 @@ impl<'p> TyCtx<'p> {
     }
 
     /// Stringify a type.
-    fn format_ty(&self, ty: TyIdx) -> String {
+    pub fn format_ty(&self, ty: TyIdx) -> String {
         match self.realize_ty(ty) {
             Ty::Int => format!("Int"),
             Ty::Str => format!("Str"),
             Ty::Bool => format!("Bool"),
             Ty::Empty => format!("()"),
             Ty::Unknown => format!("<unknown>"),
+            Ty::Ptr => format!("<opaque ptr>"),
+            Ty::TypedPtr(pointee_ty) => {
+                let pointee = self.format_ty(*pointee_ty);
+                format!("&{}", pointee)
+            }
+
             Ty::NamedStruct(struct_decl) => format!("{}", struct_decl.name),
             Ty::Tuple(arg_tys) => {
                 let mut f = String::new();
@@ -416,6 +426,9 @@ impl<'p> Program<'p> {
             is_typed: self.typed,
             ty_unknown: 0,
             ty_empty: 0,
+            ty_ptr: 0,
+            ty_int: 0,
+            ty_bool: 0,
         };
 
         let mut cfg = Cfg {
@@ -428,6 +441,9 @@ impl<'p> Program<'p> {
         // Cache some key types
         ctx.ty_unknown = ctx.memoize_inner(Ty::Unknown);
         ctx.ty_empty = ctx.memoize_inner(Ty::Empty);
+        ctx.ty_bool = ctx.memoize_inner(Ty::Bool);
+        ctx.ty_int = ctx.memoize_inner(Ty::Int);
+        ctx.ty_ptr = ctx.memoize_inner(Ty::Ptr);
 
         // Set up globals (stdlib)
         let builtins = self
@@ -458,7 +474,7 @@ impl<'p> Program<'p> {
 
         // Time to start analyzing!!
         let mut ast_main = self.ast_main.take().unwrap();
-        let (main_idx, _main_ty) =
+        let (main_idx, _main_ty, _main_captures_ty) =
             self.check_func(&mut ast_main, &mut ctx, &mut cfg, &mut captures);
         cfg.main = main_idx;
 
@@ -489,7 +505,7 @@ impl<'p> Program<'p> {
         ctx: &mut TyCtx<'p>,
         cfg: &mut Cfg<'p>,
         captures: &mut Vec<BTreeMap<&'p str, Reg>>,
-    ) -> (GlobalFuncIdx, TyIdx) {
+    ) -> (GlobalFuncIdx, TyIdx, TyIdx) {
         // Give the function's arguments their own scope, and register
         // that scope as the "root" of the function (for the purposes of
         // captures).
@@ -569,7 +585,7 @@ impl<'p> Program<'p> {
         // Cleanup
         func.captures = captures.pop().unwrap();
 
-        if !func.captures.is_empty() {
+        let captures_ty = if !func.captures.is_empty() {
             // TODO: properly type the captures
             let arg_tys = func
                 .captures
@@ -577,7 +593,8 @@ impl<'p> Program<'p> {
                 .map(|(_cap_name, cap)| cap.ty)
                 .collect();
             let captures_ty = ctx.memoize_inner(Ty::Tuple(arg_tys));
-            let captures_arg_reg = cfg.push_reg(captures_ty);
+            let captures_ptr_ty = ctx.memoize_inner(Ty::TypedPtr(captures_ty));
+            let captures_arg_reg = cfg.push_reg(captures_ptr_ty);
             cfg.bb(func_bb).args.push(captures_arg_reg);
 
             const TUPLE_INDICES: &'static [&'static str] =
@@ -587,14 +604,17 @@ impl<'p> Program<'p> {
             for (capture_idx, (_capture_name, capture_temp)) in func.captures.iter().enumerate() {
                 prelude.push(CfgStmt::RegFromVarPath {
                     new_reg: capture_temp.reg,
-                    src_var: Var::reg(captures_ty, captures_arg_reg),
+                    src_var: Var::reg(captures_ptr_ty, captures_arg_reg),
                     var_path: vec![TUPLE_INDICES[capture_idx]],
                 })
             }
             let entry_point = &mut cfg.bb(func_bb).stmts;
             let mut real_entry_point = std::mem::replace(entry_point, prelude);
             entry_point.append(&mut real_entry_point);
-        }
+            captures_ty
+        } else {
+            ctx.ty_empty
+        };
 
         ctx.envs.pop();
         assert!(
@@ -603,7 +623,7 @@ impl<'p> Program<'p> {
         );
         cfg.pop_global_func();
 
-        (func_idx, func_ty)
+        (func_idx, func_ty, captures_ty)
     }
 
     /// Analyze/Compile a block of the program (fn body, if, loop, ...).
@@ -729,7 +749,8 @@ impl<'p> Program<'p> {
                     // We push a func's name after checking it to avoid
                     // infinite capture recursion. This means naive recursion
                     // is illegal.
-                    let (global_func, func_ty) = self.check_func(func, ctx, cfg, captures);
+                    let (global_func, func_ty, captures_ty) =
+                        self.check_func(func, ctx, cfg, captures);
 
                     let mut capture_regs = Vec::new();
                     for (capture_name, _callee_capture_reg) in &func.captures {
@@ -748,11 +769,16 @@ impl<'p> Program<'p> {
                     let new_var = if capture_regs.is_empty() {
                         Var::global_func(func_ty, global_func)
                     } else {
+                        let captures_reg = cfg.push_reg(captures_ty);
+                        cfg.bb(bb).stmts.push(CfgStmt::Tuple {
+                            new_reg: captures_reg,
+                            args: capture_regs,
+                        });
                         let new_reg = cfg.push_reg(func_ty);
                         cfg.bb(bb).stmts.push(CfgStmt::RegFromClosure {
                             new_reg,
                             global_func,
-                            captures: capture_regs,
+                            captures_reg,
                         });
                         Var::reg(func_ty, new_reg)
                     };
@@ -1288,7 +1314,7 @@ pub enum CfgStmt<'p> {
     RegFromClosure {
         new_reg: RegIdx,
         global_func: GlobalFuncIdx,
-        captures: Vec<RegIdx>,
+        captures_reg: RegIdx,
     },
     Tuple {
         new_reg: RegIdx,
@@ -1320,18 +1346,18 @@ pub enum CfgStmt<'p> {
     },
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct RegIdx(pub usize);
 #[derive(Debug, Copy, Clone)]
-pub struct RegIdx(usize);
+pub struct BasicBlockIdx(pub usize);
 #[derive(Debug, Copy, Clone)]
-pub struct BasicBlockIdx(usize);
+pub struct GlobalFuncIdx(pub usize);
 #[derive(Debug, Copy, Clone)]
-pub struct GlobalFuncIdx(usize);
-#[derive(Debug, Copy, Clone)]
-pub struct GlobalNominalIdx(usize);
+pub struct GlobalNominalIdx(pub usize);
 
 #[derive(Debug)]
 pub struct RegDecl {
-    ty: TyIdx,
+    pub ty: TyIdx,
 }
 
 impl<'p> Cfg<'p> {
@@ -1522,21 +1548,14 @@ impl<'p> FuncCfg<'p> {
                     CfgStmt::RegFromClosure {
                         new_reg,
                         global_func,
-                        captures,
+                        captures_reg,
                     } => {
                         let func = &cfg.funcs[global_func.0];
-                        write!(
+                        writeln!(
                             f,
-                            "    %{} = [closure](#fn{}_{}, (",
-                            new_reg.0, global_func.0, func.func_name
+                            "    %{} = [closure](#fn{}_{}, box %{})",
+                            new_reg.0, global_func.0, func.func_name, captures_reg.0
                         )?;
-                        for (capture_idx, capture) in captures.iter().enumerate() {
-                            if capture_idx != 0 {
-                                write!(f, ", ")?;
-                            }
-                            write!(f, "%{}", capture.0)?;
-                        }
-                        writeln!(f, "))")?;
                     }
                     CfgStmt::Call {
                         new_reg,
@@ -1598,6 +1617,9 @@ impl<'p> FuncCfg<'p> {
                                 write!(f, ", ")?;
                             }
                             write!(f, "%{}", arg.0)?;
+                        }
+                        if args.len() == 1 {
+                            write!(f, ",")?;
                         }
                         writeln!(f, ")")?;
                     }

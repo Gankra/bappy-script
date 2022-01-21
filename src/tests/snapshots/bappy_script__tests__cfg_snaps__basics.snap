@@ -21,50 +21,54 @@ expression: cfg
     %1 = Int(7)
     %2 = #struct0_Point{ x: %0, y: %1 }
     %3 = (%2,)
-    %4 = [closure](#fn6_captures, box %3)
-    %5 = (%4,)
-    %6 = [closure](#fn8_calls_funcs, box %5)
-    %7 = #fn7_no_captures
-    %8 = Int(2)
-    %9 = (%4)(%8)
-    print %9
-    %10 = Int(3)
-    %11 = (%4)(%10)
+    %4 = heap_alloc()
+    %4.* = %3
+    %5 = [closure](#fn6_captures, %4)
+    %6 = (%5,)
+    %7 = heap_alloc()
+    %7.* = %6
+    %8 = [closure](#fn8_calls_funcs, %7)
+    %9 = #fn7_no_captures
+    %10 = Int(2)
+    %11 = (%5)(%10)
     print %11
-    %12 = Int(6)
-    %13 = #fn7_no_captures(%12)
+    %12 = Int(3)
+    %13 = (%5)(%12)
     print %13
-    %14 = Int(7)
-    %15 = (%7)(%14)
+    %14 = Int(6)
+    %15 = #fn7_no_captures(%14)
     print %15
-    %16 = (%6)()
-    print %16
-    %17 = Int(1)
-    %18 = Bool(true)
-    %19 = (%17, %18)
-    %20 = (%19).1
-    cond %20: bb1(), bb2()
+    %16 = Int(7)
+    %17 = (%9)(%16)
+    print %17
+    %18 = (%8)()
+    print %18
+    %19 = Int(1)
+    %20 = Bool(true)
+    %21 = (%19, %20)
+    %22 = %21.1
+    cond %22: bb1(), bb2()
 
   bb1():
-    %21 = Int(1)
-    %22 = Int(2)
-    %23 = #fn0_add(%17, %22)
-    %24 = #fn0_add(%21, %23)
-    print %24
+    %23 = Int(1)
+    %24 = Int(2)
+    %25 = #fn0_add(%19, %24)
+    %26 = #fn0_add(%23, %25)
+    print %26
     jmp bb3()
 
   bb2():
     jmp bb3()
 
   bb3():
-    %25 = Int(0)
-    ret %25
+    %27 = Int(0)
+    ret %27
 
 
 #fn6_captures(%0_arg: Int, %4_[closure]: &(Point,)):
   bb0(%0, %4):
-    %1 = (%4).0
-    %2 = (%1).y
+    %1 = %4.*.0
+    %2 = %1.y
     %3 = #fn0_add(%0, %2)
     ret %3
 
@@ -77,7 +81,7 @@ expression: cfg
 
 #fn8_calls_funcs(%6_[closure]: &(fn (Int) -> Int,)):
   bb0(%6):
-    %0 = (%6).0
+    %0 = %6.*.0
     %1 = Int(23)
     %2 = (%0)(%1)
     %3 = Int(29)

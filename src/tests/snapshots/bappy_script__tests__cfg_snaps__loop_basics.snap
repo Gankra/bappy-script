@@ -14,12 +14,12 @@ expression: cfg
   bb0():
     %0 = Bool(true)
     %1 = Int(3)
-    %2 = alloca()
-    (*%2) = %1
+    %2 = stack_alloc()
+    %2.* = %1
     jmp bb1()
 
   bb1():
-    %3 = (*%2)
+    %3 = %2.*
     %4 = Int(0)
     %5 = #fn3_eq(%3, %4)
     cond %5: bb3(), bb4()
@@ -36,11 +36,11 @@ expression: cfg
     jmp bb5()
 
   bb5():
-    %6 = (*%2)
+    %6 = %2.*
     %7 = Int(1)
     %8 = #fn1_sub(%6, %7)
-    (*%2) = %8
-    %9 = (*%2)
+    %2.* = %8
+    %9 = %2.*
     print %9
     jmp bb6()
 

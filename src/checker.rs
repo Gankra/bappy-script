@@ -16,6 +16,10 @@ use crate::*;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
+pub const FIELD_DEREF: &'static str = "*";
+pub const FIELD_TUPLE: &'static [&'static str] =
+    &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
+
 /// The structure of a type, with all subtypes resolved to type ids (TyIdx).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Ty<'p> {
@@ -360,6 +364,14 @@ impl<'p> TyCtx<'p> {
         }
     }
 
+    pub fn pointee_ty(&self, ty: TyIdx) -> TyIdx {
+        if let Ty::TypedPtr(pointee) = self.realize_ty(ty) {
+            *pointee
+        } else {
+            unreachable!("expected typed to be pointer");
+        }
+    }
+
     /// Stringify a type.
     pub fn format_ty(&self, ty: TyIdx) -> String {
         match self.realize_ty(ty) {
@@ -597,15 +609,12 @@ impl<'p> Program<'p> {
             let captures_arg_reg = cfg.push_reg(captures_ptr_ty);
             cfg.bb(func_bb).args.push(captures_arg_reg);
 
-            const TUPLE_INDICES: &'static [&'static str] =
-                &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
-
             let mut prelude = Vec::new();
             for (capture_idx, (_capture_name, capture_temp)) in func.captures.iter().enumerate() {
                 prelude.push(CfgStmt::RegFromVarPath {
                     new_reg: capture_temp.reg,
                     src_var: Var::reg(captures_ptr_ty, captures_arg_reg),
-                    var_path: vec![TUPLE_INDICES[capture_idx]],
+                    var_path: vec![FIELD_DEREF, FIELD_TUPLE[capture_idx]],
                 })
             }
             let entry_point = &mut cfg.bb(func_bb).stmts;
@@ -769,16 +778,26 @@ impl<'p> Program<'p> {
                     let new_var = if capture_regs.is_empty() {
                         Var::global_func(func_ty, global_func)
                     } else {
-                        let captures_reg = cfg.push_reg(captures_ty);
+                        let captures_tuple_reg = cfg.push_reg(captures_ty);
                         cfg.bb(bb).stmts.push(CfgStmt::Tuple {
-                            new_reg: captures_reg,
+                            new_reg: captures_tuple_reg,
                             args: capture_regs,
+                        });
+                        let box_ty = ctx.memoize_inner(Ty::TypedPtr(captures_ty));
+                        let box_reg = cfg.push_reg(box_ty);
+                        cfg.bb(bb)
+                            .stmts
+                            .push(CfgStmt::HeapAlloc { new_reg: box_reg });
+                        cfg.bb(bb).stmts.push(CfgStmt::Set {
+                            dest_var: Var::reg(box_ty, box_reg),
+                            src_reg: captures_tuple_reg,
+                            var_path: vec![FIELD_DEREF],
                         });
                         let new_reg = cfg.push_reg(func_ty);
                         cfg.bb(bb).stmts.push(CfgStmt::RegFromClosure {
                             new_reg,
                             global_func,
-                            captures_reg,
+                            captures_reg: box_reg,
                         });
                         Var::reg(func_ty, new_reg)
                     };
@@ -801,15 +820,16 @@ impl<'p> Program<'p> {
                     // it has been completely shadowed and can never be referenced again.
 
                     let new_var = if *is_mut {
-                        let alloca_reg = cfg.push_reg(expr_temp.ty);
+                        let alloca_ty = ctx.memoize_inner(Ty::TypedPtr(expr_temp.ty));
+                        let alloca_reg = cfg.push_reg(alloca_ty);
                         let new_var = Var::alloca(expr_temp.ty, alloca_reg);
-                        cfg.bb(bb).stmts.push(CfgStmt::Alloca {
+                        cfg.bb(bb).stmts.push(CfgStmt::StackAlloc {
                             new_reg: alloca_reg,
                         });
 
                         cfg.bb(bb).stmts.push(CfgStmt::Set {
                             dest_var: new_var.clone(),
-                            var_path: Vec::new(),
+                            var_path: vec![FIELD_DEREF],
                             src_reg: expr_temp.reg,
                         });
 
@@ -833,34 +853,37 @@ impl<'p> Program<'p> {
                         // Only allow locals (non-captures) to be `set`, because captures
                         // are by-value, so setting a capture is probably a mistake we don't
                         // want the user to make.
-                        if var.capture_depth == 0 {
-                            let var = var.entry.get().clone();
-                            if !matches!(var, Var::Alloca { .. }) {
-                                self.error(
-                                    format!(
-                                        "Compile Error: Trying to `set` immutable var '{}'",
-                                        var_path.ident
-                                    ),
-                                    *stmt_span,
-                                )
-                            }
-                            let expected_ty =
-                                self.resolve_var_path(ctx, var.ty(), &var_path.fields, *stmt_span);
-                            self.check_ty(ctx, expr_temp.ty, expected_ty, "`set`", expr.span);
-
-                            cfg.bb(bb).stmts.push(CfgStmt::Set {
-                                dest_var: var,
-                                src_reg: expr_temp.reg,
-                                var_path: var_path.fields.clone(),
-                            });
-                            // Unlike let, we don't actually need to update the variable
-                            // because its type isn't allowed to change!
-                        } else {
+                        if var.capture_depth != 0 {
                             self.error(
                                 format!("Compile Error: Trying to `set` captured variable '{}' (captures are by-value!)", var_path.ident),
                                 *stmt_span,
                             )
                         }
+                        let var = var.entry.get().clone();
+                        if !matches!(var, Var::Alloca { .. }) {
+                            self.error(
+                                format!(
+                                    "Compile Error: Trying to `set` immutable var '{}'",
+                                    var_path.ident
+                                ),
+                                *stmt_span,
+                            )
+                        }
+                        let expected_ty =
+                            self.resolve_var_path(ctx, var.ty(), &var_path.fields, *stmt_span);
+                        self.check_ty(ctx, expr_temp.ty, expected_ty, "`set`", expr.span);
+
+                        cfg.bb(bb).stmts.push(CfgStmt::Set {
+                            dest_var: var,
+                            src_reg: expr_temp.reg,
+                            var_path: [&FIELD_DEREF]
+                                .into_iter()
+                                .chain(var_path.fields.iter())
+                                .copied()
+                                .collect(),
+                        });
+                        // Unlike let, we don't actually need to update the variable
+                        // because its type isn't allowed to change!
                     } else {
                         self.error(
                             format!(
@@ -981,12 +1004,23 @@ impl<'p> Program<'p> {
 
                     let ty = self.resolve_var_path(ctx, src_var.ty(), &var_path.fields, expr.span);
 
-                    if src_var.needs_temp() || !var_path.fields.is_empty() {
+                    let needs_temp = src_var.needs_temp() || !var_path.fields.is_empty();
+                    let is_alloca = matches!(src_var, Var::Alloca { .. });
+                    if needs_temp {
+                        let var_path = if is_alloca {
+                            [&FIELD_DEREF]
+                                .into_iter()
+                                .chain(var_path.fields.iter())
+                                .copied()
+                                .collect()
+                        } else {
+                            var_path.fields.clone()
+                        };
                         let new_reg = cfg.push_reg(ty);
                         cfg.bb(bb).stmts.push(CfgStmt::RegFromVarPath {
                             new_reg,
                             src_var,
-                            var_path: var_path.fields.clone(),
+                            var_path,
                         });
                         return Reg::new(ty, new_reg);
                     } else if let Var::Reg { ty, reg } = src_var {
@@ -1330,8 +1364,17 @@ pub enum CfgStmt<'p> {
         func: Var,
         args: Vec<RegIdx>,
     },
-    Alloca {
+    StackAlloc {
         new_reg: RegIdx,
+    },
+    HeapAlloc {
+        new_reg: RegIdx,
+    },
+    StackDealloc {
+        src_reg: RegIdx,
+    },
+    HeapDealloc {
+        src_reg: RegIdx,
     },
     Set {
         dest_var: Var,
@@ -1522,11 +1565,8 @@ impl<'p> FuncCfg<'p> {
                         var_path,
                     } => {
                         match src_var {
-                            Var::Reg { reg, .. } => {
-                                write!(f, "    %{} = (%{})", new_reg.0, reg.0)?;
-                            }
-                            Var::Alloca { reg, .. } => {
-                                write!(f, "    %{} = (*%{})", new_reg.0, reg.0)?;
+                            Var::Reg { reg, .. } | Var::Alloca { reg, .. } => {
+                                write!(f, "    %{} = %{}", new_reg.0, reg.0)?;
                             }
                             Var::GlobalFunc { global_func, .. } => {
                                 let func = &cfg.funcs[global_func.0];
@@ -1553,7 +1593,7 @@ impl<'p> FuncCfg<'p> {
                         let func = &cfg.funcs[global_func.0];
                         writeln!(
                             f,
-                            "    %{} = [closure](#fn{}_{}, box %{})",
+                            "    %{} = [closure](#fn{}_{}, %{})",
                             new_reg.0, global_func.0, func.func_name, captures_reg.0
                         )?;
                     }
@@ -1567,7 +1607,7 @@ impl<'p> FuncCfg<'p> {
                                 write!(f, "    %{} = (%{})(", new_reg.0, reg.0)?;
                             }
                             Var::Alloca { reg, .. } => {
-                                write!(f, "    %{} = (*%{})(", new_reg.0, reg.0)?;
+                                write!(f, "    %{} = (%{}.*)(", new_reg.0, reg.0)?;
                             }
                             Var::GlobalFunc { global_func, .. } => {
                                 let func = &cfg.funcs[global_func.0];
@@ -1586,22 +1626,31 @@ impl<'p> FuncCfg<'p> {
                         }
                         writeln!(f, ")")?;
                     }
-                    CfgStmt::Alloca { new_reg } => {
-                        writeln!(f, "    %{} = alloca()", new_reg.0)?;
+                    CfgStmt::StackAlloc { new_reg } => {
+                        writeln!(f, "    %{} = stack_alloc()", new_reg.0)?;
+                    }
+                    CfgStmt::StackDealloc { src_reg } => {
+                        writeln!(f, "    stack_dealloc({})", src_reg.0)?;
+                    }
+                    CfgStmt::HeapAlloc { new_reg } => {
+                        writeln!(f, "    %{} = heap_alloc()", new_reg.0)?;
+                    }
+                    CfgStmt::HeapDealloc { src_reg } => {
+                        writeln!(f, "    heap_dealloc({})", src_reg.0)?;
                     }
                     CfgStmt::Set {
                         dest_var,
                         src_reg,
                         var_path,
                     } => {
-                        if let Var::Alloca { reg, .. } = dest_var {
-                            write!(f, "    (*%{})", reg.0)?;
+                        if let Var::Alloca { reg, .. } | Var::Reg { reg, .. } = dest_var {
+                            write!(f, "    %{}", reg.0)?;
                             for field in var_path {
                                 write!(f, ".{}", field)?;
                             }
                             writeln!(f, " = %{}", src_reg.0)?;
                         } else {
-                            panic!("Internal Compiler Error: set a non-alloca?");
+                            panic!("Internal Compiler Error: set a global function?");
                         }
                     }
                     CfgStmt::Return { src_reg } => {

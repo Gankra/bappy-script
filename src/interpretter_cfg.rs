@@ -175,8 +175,15 @@ impl CfgInterpretter {
                         let new_reg_ptr = self.reg_ptr(&flay, *new_reg);
 
                         let (callee_func_ty, (callee_func_idx, captures_ptr)) = match func {
-                            Var::Alloca { ty, reg } | Var::Reg { ty, reg } => {
-                                // In the current implementation these are the same
+                            Var::Alloca { ty, reg } => {
+                                // Need to walk through an extra level of indirection.
+                                // Ideally `call` would just have a VarPath so that this
+                                // could be pre-handled like RegFromVarPath.
+                                let reg_ptr = self.reg_ptr(&flay, *reg);
+                                let func_ptr = self.read_ptr(reg_ptr);
+                                (*ty, self.read_func(func_ptr))
+                            }
+                            Var::Reg { ty, reg } => {
                                 let reg_ptr = self.reg_ptr(&flay, *reg);
                                 (*ty, self.read_func(reg_ptr))
                             }
@@ -224,16 +231,17 @@ impl CfgInterpretter {
                     } => {
                         let dest_ptr = self.reg_ptr(&flay, *new_reg);
                         match src_var {
-                            Var::Alloca { ty, reg } | Var::Reg { ty, reg } => {
-                                // In the current implementation these are the same
+                            Var::Alloca { reg, .. } | Var::Reg { reg, .. } => {
+                                // In the current implementation, Alloca and Reg are the same
+                                let base_ty = func.regs[reg.0].ty;
                                 if var_path.is_empty() {
                                     let src_ptr = self.reg_ptr(&flay, *reg);
                                     let size = self.reg_size(&flay, *reg);
                                     self.copy_from_to(src_ptr, dest_ptr, size);
                                 } else {
                                     let base_ptr = self.reg_ptr(&flay, *reg);
-                                    let (src_ptr, size) =
-                                        self.resolve_var_path(ctx, base_ptr, *ty, var_path);
+                                    let (src_ptr, size) = self
+                                        .resolve_var_path(cfg, ctx, base_ptr, base_ty, var_path);
                                     self.copy_from_to(src_ptr, dest_ptr, size);
                                 }
                             }
@@ -248,16 +256,9 @@ impl CfgInterpretter {
                         captures_reg,
                     } => {
                         let dest_ptr = self.reg_ptr(&flay, *new_reg);
-                        let captures_ty = func.regs[captures_reg.0].ty;
-                        let captures_size_align = self.layout_of(ctx, captures_ty).size_align();
                         let captures_src_ptr = self.reg_ptr(&flay, *captures_reg);
-                        let captures_box_ptr = self.heap_alloc(captures_size_align);
-                        self.copy_from_to(
-                            captures_src_ptr,
-                            captures_box_ptr,
-                            captures_size_align.size,
-                        );
-                        self.write_func(dest_ptr, (*global_func, captures_box_ptr));
+                        let captures = self.read_ptr(captures_src_ptr);
+                        self.write_func(dest_ptr, (*global_func, captures));
                     }
                     CfgStmt::Tuple { new_reg, args } => {
                         let tuple_ty = func.regs[new_reg.0].ty;
@@ -291,7 +292,21 @@ impl CfgInterpretter {
                             );
                         }
                     }
-                    CfgStmt::Alloca { .. } => { /* noop, stack space is preallocated */ }
+                    CfgStmt::StackAlloc { .. } => { /* noop, stack space is preallocated */ }
+                    CfgStmt::StackDealloc { .. } => { /* noop, stack space is preallocated */ }
+                    CfgStmt::HeapAlloc { new_reg } => {
+                        let reg_ty = func.regs[new_reg.0].ty;
+                        let pointee_ty = ctx.pointee_ty(reg_ty);
+                        let pointee_size_align = self.layout_of(ctx, pointee_ty).size_align();
+                        let new_alloc = self.heap_alloc(pointee_size_align);
+                        let dest_ptr = self.reg_ptr(&flay, *new_reg);
+                        self.write_ptr(dest_ptr, new_alloc);
+                    }
+                    CfgStmt::HeapDealloc { src_reg } => {
+                        let src_ptr = self.reg_ptr(&flay, *src_reg);
+                        let alloc = self.read_ptr(src_ptr);
+                        self.heap_dealloc(alloc);
+                    }
                     CfgStmt::Set {
                         dest_var,
                         src_reg,
@@ -299,16 +314,17 @@ impl CfgInterpretter {
                     } => {
                         let src_ptr = self.reg_ptr(&flay, *src_reg);
                         match dest_var {
-                            Var::Alloca { ty, reg } | Var::Reg { ty, reg } => {
+                            Var::Alloca { reg, .. } | Var::Reg { reg, .. } => {
                                 // In the current implementation these are the same
+                                let base_ty = func.regs[reg.0].ty;
                                 if var_path.is_empty() {
                                     let dest_ptr = self.reg_ptr(&flay, *reg);
                                     let size = self.reg_size(&flay, *reg);
                                     self.copy_from_to(src_ptr, dest_ptr, size);
                                 } else {
                                     let base_ptr = self.reg_ptr(&flay, *reg);
-                                    let (dest_ptr, size) =
-                                        self.resolve_var_path(ctx, base_ptr, *ty, var_path);
+                                    let (dest_ptr, size) = self
+                                        .resolve_var_path(cfg, ctx, base_ptr, base_ty, var_path);
                                     self.copy_from_to(src_ptr, dest_ptr, size);
                                 }
                             }
@@ -318,7 +334,7 @@ impl CfgInterpretter {
                         }
                     }
                     CfgStmt::Print { src_reg } => {
-                        let string = self.format_reg(ctx, func, &flay, *src_reg);
+                        let string = self.format_reg(cfg, ctx, func, &flay, *src_reg);
                         println!("{}", string);
 
                         self.output.push_str(&string);
@@ -346,7 +362,7 @@ impl CfgInterpretter {
         self.heap_ptr = new_len;
         aligned_ptr
     }
-    fn heap_dealloc(&mut self, ptr: Ptr) {
+    fn heap_dealloc(&mut self, _ptr: Ptr) {
         todo!()
     }
 
@@ -379,6 +395,7 @@ impl CfgInterpretter {
 
     fn resolve_var_path(
         &self,
+        _cfg: &Cfg,
         ctx: &TyCtx,
         base_ptr: Ptr,
         ty: TyIdx,
@@ -389,47 +406,46 @@ impl CfgInterpretter {
         let mut ty = ty;
         let mut size = 0;
         'main: for field_name in var_path {
-            // Loop infinitely to handle autoderef
-            loop {
-                match ctx.realize_ty(ty) {
-                    Ty::NamedStruct(struct_ty) => {
-                        let layout = self.composite_layout_of(ctx, ty);
-                        for (field_idx, field) in struct_ty.fields.iter().enumerate() {
-                            if field.ident == *field_name {
-                                let field_layout = &layout.fields[field_idx];
-                                ptr = ptr + field_layout.offset;
-                                size = field_layout.size;
-                                ty = field.ty;
-                                continue 'main;
-                            }
+            match ctx.realize_ty(ty) {
+                Ty::NamedStruct(struct_ty) => {
+                    let layout = self.composite_layout_of(ctx, ty);
+                    for (field_idx, field) in struct_ty.fields.iter().enumerate() {
+                        if field.ident == *field_name {
+                            let field_layout = &layout.fields[field_idx];
+                            ptr = ptr + field_layout.offset;
+                            size = field_layout.size;
+                            ty = field.ty;
+                            continue 'main;
                         }
-                        unreachable!("tried to access non-existent field of struct??");
                     }
-                    Ty::Tuple(arg_tys) => {
-                        let layout = self.composite_layout_of(ctx, ty);
-                        let field_idx = field_name
-                            .parse::<usize>()
-                            .expect("tuple index wasn't an integer?");
-                        let field_layout = &layout.fields[field_idx];
-                        ptr = ptr + field_layout.offset;
-                        size = field_layout.size;
-                        ty = arg_tys[field_idx];
-                        continue 'main;
-                    }
-                    Ty::TypedPtr(pointee_ty) => {
-                        let new_ptr = self.read_ptr(ptr);
-                        // println!("autoderef 0x{:08x} => 0x{:08x} ", ptr, new_ptr);
-                        ptr = new_ptr;
-                        ty = *pointee_ty;
-                    }
-                    _ => {
-                        unreachable!("tried to access field of non-composite??");
-                    }
+                    unreachable!("tried to access non-existent field of struct??");
+                }
+                Ty::Tuple(arg_tys) => {
+                    let layout = self.composite_layout_of(ctx, ty);
+                    let field_idx = field_name
+                        .parse::<usize>()
+                        .expect("tuple index wasn't an integer?");
+                    let field_layout = &layout.fields[field_idx];
+                    ptr = ptr + field_layout.offset;
+                    size = field_layout.size;
+                    ty = arg_tys[field_idx];
+                    continue 'main;
+                }
+                Ty::TypedPtr(pointee_ty) => {
+                    assert!(*field_name == FIELD_DEREF);
+                    let new_ptr = self.read_ptr(ptr);
+                    // println!("deref 0x{:08x} => 0x{:08x} ", ptr, new_ptr);
+                    ptr = new_ptr;
+                    ty = *pointee_ty;
+                    size = self.layout_of(ctx, *pointee_ty).size_align().size;
+                }
+                _ => {
+                    unreachable!("tried to access field of non-composite??");
                 }
             }
         }
         // let mut f = String::new();
-        // self.format_ptr(&mut f, ctx, ptr, ty, false, 0).unwrap();
+        // self.format_ptr(&mut f, cfg, ctx, ptr, ty, false, 0).unwrap();
         // println!("varpath: {:?} = *0x{:08x} = {}", var_path, ptr, f);
 
         (ptr, size)
@@ -737,17 +753,26 @@ impl CfgInterpretter {
         }
     }
 
-    fn format_reg(&self, ctx: &TyCtx, func: &FuncCfg, flay: &FrameLayout, reg: RegIdx) -> String {
+    fn format_reg(
+        &self,
+        cfg: &Cfg,
+        ctx: &TyCtx,
+        func: &FuncCfg,
+        flay: &FrameLayout,
+        reg: RegIdx,
+    ) -> String {
         let mut f = String::new();
         let ptr = self.reg_ptr(flay, reg);
         let ty = func.regs[reg.0].ty;
-        self.format_ptr(&mut f, ctx, ptr, ty, false, 0).unwrap();
+        self.format_ptr(&mut f, cfg, ctx, ptr, ty, false, 0)
+            .unwrap();
         f
     }
 
     fn format_ptr<F: std::fmt::Write>(
         &self,
         f: &mut F,
+        cfg: &Cfg,
         ctx: &TyCtx,
         ptr: Ptr,
         ty: TyIdx,
@@ -795,7 +820,7 @@ impl CfgInterpretter {
                     }
                     let arg_ptr = ptr + arg_layout.offset;
                     // Debug print fields unconditionally to make 0 vs "0" clear
-                    self.format_ptr(f, ctx, arg_ptr, *arg_ty, true, indent)?;
+                    self.format_ptr(f, cfg, ctx, arg_ptr, *arg_ty, true, indent)?;
                 }
                 write!(f, ")")
             }
@@ -814,50 +839,48 @@ impl CfgInterpretter {
                     let field_ptr = ptr + field_layout.offset;
                     write!(f, "{}: ", field.ident)?;
                     // Debug print fields unconditionally to make 0 vs "0" clear
-                    self.format_ptr(f, ctx, field_ptr, field.ty, true, indent)?;
+                    self.format_ptr(f, cfg, ctx, field_ptr, field.ty, true, indent)?;
                 }
                 write!(f, " }}")
             }
-            Ty::Func { arg_tys, return_ty } => {
-                /*
-                write!(f, "fn {}(", closure.func.name).unwrap();
-                for (i, arg) in closure.func.args.iter().enumerate() {
-                    if i != 0 {
-                        write!(f, ", ").unwrap();
-                    }
-                    write!(f, "{}", arg.ident).unwrap();
-                }
-                writeln!(f, ")").unwrap();
-
-                if !closure.captures.is_empty() {
-                    let indent = indent + 2;
-                    write!(f, "{:indent$}captures:", "", indent = indent).unwrap();
-                    for (arg, capture) in &closure.captures {
-                        writeln!(f, "").unwrap();
-                        let sub_indent = indent + arg.len() + 2;
-                        // Debug print captures unconditionally to make 0 vs "0" clear
-                        let val = self.format_val(capture, true, sub_indent);
-                        write!(f, "{:indent$}- {}: {}", "", arg, val, indent = indent).unwrap();
-                    }
-                }
-                */
-                /*
-                Val::Builtin(builtin) => {
-                    let mut f = String::new();
-                    /*
-                    write!(f, "builtin {}(", builtin.name).unwrap();
-                    for (i, arg) in builtin.args.iter().enumerate() {
-                        if i != 0 {
-                            write!(f, ", ").unwrap();
+            Ty::Func { .. } => {
+                let (func_id, captures) = self.read_func(ptr);
+                let func = &cfg.funcs[func_id.0];
+                write!(f, "fn #{}_{}", func_id.0, func.func_name)?;
+                if captures != 0 {
+                    let captures_ptr_reg = *func.blocks[0].args.last().unwrap();
+                    let captures_ptr_ty = func.regs[captures_ptr_reg.0].ty;
+                    let captures_ty_idx = ctx.pointee_ty(captures_ptr_ty);
+                    let captures_ty = ctx.realize_ty(captures_ty_idx);
+                    let captures_layout = self.layout_of(ctx, captures_ty_idx);
+                    if let (Ty::Tuple(arg_tys), TyLayout::Composite(layout)) =
+                        (captures_ty, captures_layout)
+                    {
+                        let indent = indent + 2;
+                        writeln!(f, "")?;
+                        write!(f, "{:indent$}captures:", "", indent = indent)?;
+                        for (capture_ty, capture_layout) in arg_tys.iter().zip(layout.fields.iter())
+                        {
+                            let capture_ptr = captures + capture_layout.offset;
+                            writeln!(f, "")?;
+                            let sub_indent = indent + 2;
+                            write!(f, "{:indent$}- ", "", indent = indent)?;
+                            // Debug print captures unconditionally to make 0 vs "0" clear
+                            self.format_ptr(
+                                f,
+                                cfg,
+                                ctx,
+                                capture_ptr,
+                                *capture_ty,
+                                true,
+                                sub_indent,
+                            )?;
                         }
-                        write!(f, "{}", arg).unwrap();
+                    } else {
+                        unreachable!("func captures weren't a tuple?");
                     }
-                    writeln!(f, ")").unwrap();
-                    f
-                    */
                 }
-                */
-                write!(f, "fn <unimplemented print>")
+                Ok(())
             }
             Ty::Unknown => {
                 write!(f, "<unknown>")

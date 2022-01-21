@@ -24,7 +24,7 @@ fn square(x:Int)->Int{
 }
 
 let pt = Point { x: 1, y: 3 }
-let z = 5
+let z = 4
 
 fn captures() -> Int {
     ret add(square(pt.x), square(pt.y))
@@ -33,7 +33,10 @@ fn super_captures() -> Int {
     ret sub(captures(), z)
 }
 
+print square(9)
+print captures
 print captures()
+print super_captures
 print super_captures()
 ret 0
 "#;

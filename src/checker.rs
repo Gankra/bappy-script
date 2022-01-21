@@ -16,10 +16,6 @@ use crate::*;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
-pub const FIELD_DEREF: &'static str = "*";
-pub const FIELD_TUPLE: &'static [&'static str] =
-    &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
-
 /// The structure of a type, with all subtypes resolved to type ids (TyIdx).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Ty<'p> {
@@ -614,7 +610,10 @@ impl<'p> Program<'p> {
                 prelude.push(CfgStmt::Copy {
                     new_reg: capture_temp.reg,
                     src_var: Var::reg(captures_ptr_ty, captures_arg_reg),
-                    var_path: vec![FIELD_DEREF, FIELD_TUPLE[capture_idx]],
+                    var_path: vec![
+                        CfgPathPart::Deref,
+                        CfgPathPart::Field(CompositeFieldIdx(capture_idx)),
+                    ],
                 })
             }
             let entry_point = &mut cfg.bb(func_bb).stmts;
@@ -791,7 +790,7 @@ impl<'p> Program<'p> {
                         cfg.bb(bb).stmts.push(CfgStmt::Set {
                             dest_var: Var::reg(box_ty, box_reg),
                             src_reg: captures_tuple_reg,
-                            var_path: vec![FIELD_DEREF],
+                            var_path: vec![CfgPathPart::Deref],
                         });
                         let new_reg = cfg.push_reg(func_ty);
                         cfg.bb(bb).stmts.push(CfgStmt::Closure {
@@ -831,7 +830,7 @@ impl<'p> Program<'p> {
 
                         cfg.bb(bb).stmts.push(CfgStmt::Set {
                             dest_var: new_var.clone(),
-                            var_path: vec![FIELD_DEREF],
+                            var_path: vec![CfgPathPart::Deref],
                             src_reg: expr_temp.reg,
                         });
 
@@ -871,18 +870,19 @@ impl<'p> Program<'p> {
                                 *stmt_span,
                             )
                         }
-                        let expected_ty =
-                            self.resolve_var_path(ctx, var.ty(), &var_path.fields, *stmt_span);
+                        let (expected_ty, var_path) = self.resolve_var_path(
+                            ctx,
+                            var.ty(),
+                            &var_path.fields,
+                            true,
+                            *stmt_span,
+                        );
                         self.check_ty(ctx, expr_temp.ty, expected_ty, "`set`", expr.span);
 
                         cfg.bb(bb).stmts.push(CfgStmt::Set {
                             dest_var: var,
                             src_reg: expr_temp.reg,
-                            var_path: [&FIELD_DEREF]
-                                .into_iter()
-                                .chain(var_path.fields.iter())
-                                .copied()
-                                .collect(),
+                            var_path,
                         });
                         // Unlike let, we don't actually need to update the variable
                         // because its type isn't allowed to change!
@@ -1004,20 +1004,17 @@ impl<'p> Program<'p> {
                         }
                     }
 
-                    let ty = self.resolve_var_path(ctx, src_var.ty(), &var_path.fields, expr.span);
-
                     let needs_temp = src_var.needs_temp() || !var_path.fields.is_empty();
                     let is_alloca = matches!(src_var, Var::Alloca { .. });
+                    let (ty, var_path) = self.resolve_var_path(
+                        ctx,
+                        src_var.ty(),
+                        &var_path.fields,
+                        is_alloca,
+                        expr.span,
+                    );
+
                     if needs_temp {
-                        let var_path = if is_alloca {
-                            [&FIELD_DEREF]
-                                .into_iter()
-                                .chain(var_path.fields.iter())
-                                .copied()
-                                .collect()
-                        } else {
-                            var_path.fields.clone()
-                        };
                         let new_reg = cfg.push_reg(ty);
                         cfg.bb(bb).stmts.push(CfgStmt::Copy {
                             new_reg,
@@ -1073,7 +1070,9 @@ impl<'p> Program<'p> {
                             )
                         }
                         let mut field_regs = Vec::new();
-                        for ((field, arg), field_decl) in args.iter().zip(ty_decl.fields.iter()) {
+                        for (field_idx, ((field, arg), field_decl)) in
+                            args.iter().zip(ty_decl.fields.iter()).enumerate()
+                        {
                             if *field != field_decl.ident {
                                 self.error(
                                     format!(
@@ -1094,7 +1093,7 @@ impl<'p> Program<'p> {
                                 arg.span,
                             );
 
-                            field_regs.push((field_decl.ident, field_temp.reg));
+                            field_regs.push((CompositeFieldIdx(field_idx), field_temp.reg));
                         }
 
                         let nominal_idx = cfg.push_struct_decl(ty_idx);
@@ -1237,15 +1236,21 @@ NOTE: the types look the same, but the named types have different decls!"#,
         ctx: &mut TyCtx<'p>,
         root_ty: TyIdx,
         path: &[&'p str],
+        needs_deref: bool,
         span: Span,
-    ) -> TyIdx {
+    ) -> (TyIdx, Vec<CfgPathPart>) {
         let mut cur_ty = root_ty;
+        let mut out_path = Vec::new();
+        if needs_deref {
+            out_path.push(CfgPathPart::Deref);
+        }
         'path: for field in path {
             match ctx.realize_ty(cur_ty) {
                 Ty::NamedStruct(struct_decl) => {
-                    for struct_field in &struct_decl.fields {
+                    for (field_idx, struct_field) in struct_decl.fields.iter().enumerate() {
                         if &struct_field.ident == field {
                             cur_ty = struct_field.ty;
+                            out_path.push(CfgPathPart::Field(CompositeFieldIdx(field_idx)));
                             continue 'path;
                         }
                     }
@@ -1258,10 +1263,13 @@ NOTE: the types look the same, but the named types have different decls!"#,
                     )
                 }
                 Ty::Tuple(arg_tys) => {
-                    if let Some(field_ty) =
-                        field.parse::<usize>().ok().and_then(|idx| arg_tys.get(idx))
+                    if let Some((field_idx, field_ty)) = field
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|idx| arg_tys.get(idx).map(|ty| (idx, ty)))
                     {
                         cur_ty = *field_ty;
+                        out_path.push(CfgPathPart::Field(CompositeFieldIdx(field_idx)));
                         continue 'path;
                     } else {
                         self.error(
@@ -1283,7 +1291,7 @@ NOTE: the types look the same, but the named types have different decls!"#,
                 ),
             }
         }
-        cur_ty
+        (cur_ty, out_path)
     }
 }
 
@@ -1342,7 +1350,7 @@ pub enum CfgStmt<'p> {
     Copy {
         new_reg: RegIdx,
         src_var: Var,
-        var_path: Vec<&'p str>,
+        var_path: Vec<CfgPathPart>,
     },
     Lit {
         new_reg: RegIdx,
@@ -1360,7 +1368,7 @@ pub enum CfgStmt<'p> {
     Struct {
         new_reg: RegIdx,
         nominal: GlobalNominalIdx,
-        fields: Vec<(&'p str, RegIdx)>,
+        fields: Vec<(CompositeFieldIdx, RegIdx)>,
     },
     Call {
         new_reg: RegIdx,
@@ -1383,7 +1391,7 @@ pub enum CfgStmt<'p> {
     Set {
         dest_var: Var,
         src_reg: RegIdx,
-        var_path: Vec<&'p str>,
+        var_path: Vec<CfgPathPart>,
     },
     Return {
         src_reg: RegIdx,
@@ -1403,6 +1411,14 @@ pub struct BasicBlockIdx(pub usize);
 pub struct GlobalFuncIdx(pub usize);
 #[derive(Debug, Copy, Clone)]
 pub struct GlobalNominalIdx(pub usize);
+#[derive(Debug, Copy, Clone)]
+pub struct CompositeFieldIdx(pub usize);
+
+#[derive(Debug, Copy, Clone)]
+pub enum CfgPathPart {
+    Field(CompositeFieldIdx),
+    Deref,
+}
 
 #[derive(Debug)]
 pub struct RegDecl {
@@ -1614,7 +1630,8 @@ impl<'p> FuncCfg<'p> {
                             }
                         }
                         for field in var_path {
-                            write!(f, ".{}", field)?;
+                            write!(f, ".")?;
+                            field.format(f)?;
                         }
                         writeln!(f)?;
                     }
@@ -1682,7 +1699,8 @@ impl<'p> FuncCfg<'p> {
                         if let Var::Alloca { reg, .. } | Var::Reg { reg, .. } = dest_var {
                             write!(f, "    %{}", reg.0)?;
                             for field in var_path {
-                                write!(f, ".{}", field)?;
+                                write!(f, ".")?;
+                                field.format(f)?;
                             }
                             writeln!(f, " = %{}", src_reg.0)?;
                         } else {
@@ -1725,7 +1743,7 @@ impl<'p> FuncCfg<'p> {
                                 if field_idx != 0 {
                                     write!(f, ", ")?;
                                 }
-                                write!(f, "{}: %{}", field_name, field_reg.0)?;
+                                write!(f, "{}: %{}", field_name.0, field_reg.0)?;
                             }
                             writeln!(f, " }}")?;
                         } else {
@@ -1751,5 +1769,14 @@ impl BasicBlockJmp {
         }
         write!(f, ")")?;
         Ok(())
+    }
+}
+
+impl CfgPathPart {
+    fn format<F: std::fmt::Write>(&self, f: &mut F) -> std::fmt::Result {
+        match self {
+            CfgPathPart::Deref => write!(f, "*"),
+            CfgPathPart::Field(field) => write!(f, "{}", field.0),
+        }
     }
 }

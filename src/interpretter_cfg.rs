@@ -101,7 +101,7 @@ impl<'p> Program<'p> {
 
         let main_idx = cfg.main;
 
-        let mut interpretter = CfgInterpretter {
+        let mut interp = CfgInterpretter {
             rodata: self.input.as_bytes().to_owned(),
             string_base: self.input.as_ptr() as usize,
             memory: vec![0; MAX_STACK_SIZE + MAX_HEAP_SIZE],
@@ -113,20 +113,25 @@ impl<'p> Program<'p> {
             output: String::new(),
         };
 
-        interpretter.compute_layouts(&cfg, &ctx);
+        interp.compute_layouts(&cfg, &ctx);
 
         // Reserve space for main's return value
-        let orig_stack_base = interpretter.stack_ptr;
-        let main_return_offset = 8;
-        interpretter.stack_ptr = interpretter.add(interpretter.stack_ptr, main_return_offset);
+        let orig_stack_base = interp.stack_ptr;
+        let main_ty = cfg.func(main_idx).func_ty;
+        let caller_abi = &interp.func_layout_of(&ctx, main_ty).abi;
+        let main_caller_reserve = caller_abi.args_size;
+        let main_return_val_ptr = interp.add(orig_stack_base, caller_abi.return_offset);
+        interp.stack_ptr = interp.add(orig_stack_base, main_caller_reserve);
+
         // Run main
-        interpretter.eval_func(&cfg, &ctx, main_idx);
-        assert!(interpretter.stack_ptr.0 == orig_stack_base.0 + main_return_offset);
+        interp.eval_func(&cfg, &ctx, main_idx);
+        assert!(interp.stack_ptr.0 == orig_stack_base.0 + main_caller_reserve);
+
         // Read main's return value
         self.cfg = Some(cfg);
         self.ctx = Some(ctx);
-        self.output = Some(std::mem::replace(&mut interpretter.output, String::new()));
-        interpretter.read_int(orig_stack_base)
+        self.output = Some(std::mem::replace(&mut interp.output, String::new()));
+        interp.read_int(main_return_val_ptr)
     }
 }
 
@@ -403,55 +408,61 @@ impl CfgInterpretter {
             unreachable!("Composite wasn't a composite?")
         }
     }
+    fn func_layout_of(&self, ctx: &TyCtx, ty: TyIdx) -> &FuncLayout {
+        assert!(
+            ty != ctx.ty_unknown,
+            "CFG interpretter should never encounter Ty::Unknown!"
+        );
+        if let TyLayout::Func(func) = &self.ty_layouts[ty] {
+            func
+        } else {
+            unreachable!("Composite wasn't a composite?")
+        }
+    }
 
     fn resolve_var_path(
         &self,
         _cfg: &Cfg,
         ctx: &TyCtx,
         base_ptr: Ptr,
-        ty: TyIdx,
-        var_path: &[&str],
+        base_ty: TyIdx,
+        var_path: &[CfgPathPart],
     ) -> (Ptr, usize) {
         // println!("resolving var path at 0x{:08x}", base_ptr);
         let mut ptr = base_ptr;
-        let mut ty = ty;
+        let mut ty = base_ty;
         let mut size = 0;
-        'main: for field_name in var_path {
-            match ctx.realize_ty(ty) {
-                Ty::NamedStruct(struct_ty) => {
-                    let layout = self.composite_layout_of(ctx, ty);
-                    for (field_idx, field) in struct_ty.fields.iter().enumerate() {
-                        if field.ident == *field_name {
-                            let field_layout = &layout.fields[field_idx];
-                            ptr = self.add(ptr, field_layout.offset);
-                            size = field_layout.size;
-                            ty = field.ty;
-                            continue 'main;
-                        }
-                    }
-                    unreachable!("tried to access non-existent field of struct??");
-                }
-                Ty::Tuple(arg_tys) => {
-                    let layout = self.composite_layout_of(ctx, ty);
-                    let field_idx = field_name
-                        .parse::<usize>()
-                        .expect("tuple index wasn't an integer?");
-                    let field_layout = &layout.fields[field_idx];
-                    ptr = self.add(ptr, field_layout.offset);
-                    size = field_layout.size;
-                    ty = arg_tys[field_idx];
-                    continue 'main;
-                }
-                Ty::TypedPtr(pointee_ty) => {
-                    assert!(*field_name == FIELD_DEREF);
+        'main: for path_part in var_path {
+            match (path_part, self.layout_of(ctx, ty)) {
+                (CfgPathPart::Deref, TyLayout::Primitive(_)) => {
+                    let pointee_ty = ctx.pointee_ty(ty);
                     let new_ptr = self.read_ptr(ptr);
                     // println!("deref 0x{:08x} => 0x{:08x} ", ptr, new_ptr);
                     ptr = new_ptr;
-                    ty = *pointee_ty;
-                    size = self.layout_of(ctx, *pointee_ty).size_align().size;
+                    ty = pointee_ty;
+                    size = self.layout_of(ctx, pointee_ty).size_align().size;
+                    continue 'main;
+                }
+                (CfgPathPart::Field(field_idx), TyLayout::Composite(layout)) => {
+                    let field_layout = &layout.fields[field_idx.0];
+                    ptr = self.add(ptr, field_layout.offset);
+                    size = field_layout.size;
+
+                    match ctx.realize_ty(ty) {
+                        Ty::NamedStruct(struct_ty) => {
+                            ty = struct_ty.fields[field_idx.0].ty;
+                        }
+                        Ty::Tuple(arg_tys) => {
+                            ty = arg_tys[field_idx.0];
+                        }
+                        _ => {
+                            unreachable!("tried to access field of non-composite")
+                        }
+                    }
+                    continue 'main;
                 }
                 _ => {
-                    unreachable!("tried to access field of non-composite??");
+                    unreachable!("invalid field");
                 }
             }
         }
@@ -786,6 +797,7 @@ impl CfgInterpretter {
                 *reg_offset += max_arg_size;
             }
 
+            /*
             println!("func {}", func_idx);
             println!("  allocs:");
             for (alloc_idx, alloc_offset) in self.frame_layouts[func_idx]
@@ -800,6 +812,7 @@ impl CfgInterpretter {
             {
                 println!("    %{} @ 0x{:x}", reg_idx, reg_offset);
             }
+            */
         }
     }
 

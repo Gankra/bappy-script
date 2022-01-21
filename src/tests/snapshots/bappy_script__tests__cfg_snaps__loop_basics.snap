@@ -14,7 +14,7 @@ expression: cfg
   bb0():
     %0 = Bool(true)
     %1 = Int(3)
-    %2 = stack_alloc()
+    %2 = stack_alloc() (slot 0)
     %2.* = %1
     jmp bb1()
 

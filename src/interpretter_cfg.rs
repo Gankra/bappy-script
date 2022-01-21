@@ -13,7 +13,8 @@ const MAX_HEAP_SIZE: usize = 1024 * 1024 * 16;
 const PTR_SIZE: usize = std::mem::size_of::<Ptr>();
 const PTR_ALIGN: usize = std::mem::align_of::<Ptr>();
 
-type Ptr = usize;
+#[derive(Copy, Clone, Debug)]
+struct Ptr(usize);
 
 pub struct CfgInterpretter {
     builtins: Vec<Builtin>,
@@ -23,8 +24,8 @@ pub struct CfgInterpretter {
     rodata: Vec<u8>,
     memory: Vec<u8>,
     string_base: usize,
-    stack_ptr: usize,
-    heap_ptr: usize,
+    stack_ptr: Ptr,
+    heap_ptr: Ptr,
     output: String,
 }
 
@@ -43,6 +44,7 @@ pub struct FrameLayout {
     pub args_size: usize,
     /// Offset from the stack pointer to the variable.
     /// This will reach into the caller's stackframe for function args.
+    pub alloc_offsets: Vec<usize>,
     pub reg_offsets: Vec<usize>,
     pub reg_sizes: Vec<usize>,
     pub return_offset: usize,
@@ -103,8 +105,8 @@ impl<'p> Program<'p> {
             rodata: self.input.as_bytes().to_owned(),
             string_base: self.input.as_ptr() as usize,
             memory: vec![0; MAX_STACK_SIZE + MAX_HEAP_SIZE],
-            stack_ptr: 0,
-            heap_ptr: MAX_STACK_SIZE,
+            stack_ptr: Ptr(16),
+            heap_ptr: Ptr(MAX_STACK_SIZE),
             builtins,
             ty_layouts: Vec::new(),
             frame_layouts: Vec::new(),
@@ -114,32 +116,34 @@ impl<'p> Program<'p> {
         interpretter.compute_layouts(&cfg, &ctx);
 
         // Reserve space for main's return value
-        interpretter.stack_ptr += 8;
+        let orig_stack_base = interpretter.stack_ptr;
+        let main_return_offset = 8;
+        interpretter.stack_ptr = interpretter.add(interpretter.stack_ptr, main_return_offset);
         // Run main
         interpretter.eval_func(&cfg, &ctx, main_idx);
-        assert!(interpretter.stack_ptr == 8);
+        assert!(interpretter.stack_ptr.0 == orig_stack_base.0 + main_return_offset);
         // Read main's return value
         self.cfg = Some(cfg);
         self.ctx = Some(ctx);
         self.output = Some(std::mem::replace(&mut interpretter.output, String::new()));
-        interpretter.read_int(0)
+        interpretter.read_int(orig_stack_base)
     }
 }
 
 impl CfgInterpretter {
     fn eval_func(&mut self, cfg: &Cfg, ctx: &TyCtx, func_idx: GlobalFuncIdx) {
-        let func = &cfg.funcs[func_idx.0];
+        let func = &cfg.func(func_idx);
         if func.blocks.is_empty() {
             return self.eval_builtin(cfg, ctx, func_idx);
         }
-        let mut cur_block = 0;
+        let mut cur_block = BasicBlockIdx(0);
 
         let flay = self.frame_layouts[func_idx.0].clone();
-        self.stack_ptr += flay.frame_size;
-        let return_val_ptr = self.stack_ptr - flay.return_offset;
+        self.stack_ptr = self.add(self.stack_ptr, flay.frame_size);
+        let return_val_ptr = self.sub(self.stack_ptr, flay.return_offset);
 
         'eval_loop: loop {
-            let block = &func.blocks[cur_block];
+            let block = &func.block(cur_block);
             for stmt in &block.stmts {
                 match stmt {
                     CfgStmt::Branch {
@@ -149,21 +153,21 @@ impl CfgInterpretter {
                     } => {
                         let cond_reg = self.reg_ptr(&flay, *cond);
                         if self.read_bool(cond_reg) {
-                            cur_block = if_block.block_id.0;
+                            cur_block = if_block.block_id;
                         } else {
-                            cur_block = else_block.block_id.0;
+                            cur_block = else_block.block_id;
                         }
                         continue 'eval_loop;
                     }
                     CfgStmt::Jump(block) => {
-                        cur_block = block.block_id.0;
+                        cur_block = block.block_id;
                         continue 'eval_loop;
                     }
                     CfgStmt::Return { src_reg } => {
                         let size = self.reg_size(&flay, *src_reg);
                         let src_ptr = self.reg_ptr(&flay, *src_reg);
                         self.copy_from_to(src_ptr, return_val_ptr, size);
-                        self.stack_ptr -= flay.frame_size;
+                        self.stack_ptr = self.sub(self.stack_ptr, flay.frame_size);
                         return;
                     }
                     CfgStmt::Call {
@@ -187,7 +191,7 @@ impl CfgInterpretter {
                                 let reg_ptr = self.reg_ptr(&flay, *reg);
                                 (*ty, self.read_func(reg_ptr))
                             }
-                            Var::GlobalFunc { ty, global_func } => (*ty, (*global_func, 0)),
+                            Var::GlobalFunc { ty, global_func } => (*ty, (*global_func, Ptr(0))),
                         };
                         let callee_abi =
                             if let TyLayout::Func(func_layout) = &self.ty_layouts[callee_func_ty] {
@@ -197,25 +201,25 @@ impl CfgInterpretter {
                             };
 
                         let args_size = callee_abi.args_size;
-                        let args_ptr = self.stack_ptr - args_size;
+                        let args_ptr = self.sub(self.stack_ptr, args_size);
                         for (arg_idx, arg_src_reg) in args.iter().enumerate() {
                             let arg_offset = callee_abi.args_offsets[arg_idx];
-                            let arg_dest_ptr = args_ptr + arg_offset;
+                            let arg_dest_ptr = self.add(args_ptr, arg_offset);
                             let arg_src_ptr = self.reg_ptr(&flay, *arg_src_reg);
                             let arg_size = self.reg_size(&flay, *arg_src_reg);
                             self.copy_from_to(arg_src_ptr, arg_dest_ptr, arg_size);
                         }
                         {
                             let capture_arg_offset = callee_abi.args_offsets.last().unwrap();
-                            let capture_arg_dest_ptr = args_ptr + capture_arg_offset;
+                            let capture_arg_dest_ptr = self.add(args_ptr, *capture_arg_offset);
                             self.write_ptr(capture_arg_dest_ptr, captures_ptr);
                         }
                         let callee_return_offset = callee_abi.return_offset;
-                        let callee_return_val_ptr = args_ptr + callee_return_offset;
+                        let callee_return_val_ptr = self.add(args_ptr, callee_return_offset);
                         self.eval_func(cfg, ctx, callee_func_idx);
                         self.copy_from_to(callee_return_val_ptr, new_reg_ptr, size);
                     }
-                    CfgStmt::RegFromLit { new_reg, lit } => {
+                    CfgStmt::Lit { new_reg, lit } => {
                         let dest_ptr = self.reg_ptr(&flay, *new_reg);
                         match lit {
                             Literal::Int(val) => self.write_int(dest_ptr, *val),
@@ -224,7 +228,7 @@ impl CfgInterpretter {
                             Literal::Empty(()) => { /* noop */ }
                         }
                     }
-                    CfgStmt::RegFromVarPath {
+                    CfgStmt::Copy {
                         new_reg,
                         src_var,
                         var_path,
@@ -246,11 +250,11 @@ impl CfgInterpretter {
                                 }
                             }
                             Var::GlobalFunc { global_func, .. } => {
-                                self.write_func(dest_ptr, (*global_func, 0));
+                                self.write_func(dest_ptr, (*global_func, Ptr(0)));
                             }
                         }
                     }
-                    CfgStmt::RegFromClosure {
+                    CfgStmt::Closure {
                         new_reg,
                         global_func,
                         captures_reg,
@@ -261,7 +265,7 @@ impl CfgInterpretter {
                         self.write_func(dest_ptr, (*global_func, captures));
                     }
                     CfgStmt::Tuple { new_reg, args } => {
-                        let tuple_ty = func.regs[new_reg.0].ty;
+                        let tuple_ty = func.reg(*new_reg).ty;
                         let tuple_layout = self.composite_layout_of(ctx, tuple_ty).clone();
                         let dest_ptr = self.reg_ptr(&flay, *new_reg);
 
@@ -269,7 +273,7 @@ impl CfgInterpretter {
                             let src_ptr = self.reg_ptr(&flay, *src_reg);
                             self.copy_from_to(
                                 src_ptr,
-                                dest_ptr + field_layout.offset,
+                                self.add(dest_ptr, field_layout.offset),
                                 field_layout.size,
                             );
                         }
@@ -287,12 +291,16 @@ impl CfgInterpretter {
                             let src_ptr = self.reg_ptr(&flay, src_reg.1);
                             self.copy_from_to(
                                 src_ptr,
-                                dest_ptr + field_layout.offset,
+                                self.add(dest_ptr, field_layout.offset),
                                 field_layout.size,
                             );
                         }
                     }
-                    CfgStmt::StackAlloc { .. } => { /* noop, stack space is preallocated */ }
+                    CfgStmt::StackAlloc { new_reg, alloc } => {
+                        let alloc_ptr = self.alloc_ptr(&flay, *alloc);
+                        let dest_ptr = self.reg_ptr(&flay, *new_reg);
+                        self.write_ptr(dest_ptr, alloc_ptr);
+                    }
                     CfgStmt::StackDealloc { .. } => { /* noop, stack space is preallocated */ }
                     CfgStmt::HeapAlloc { new_reg } => {
                         let reg_ty = func.regs[new_reg.0].ty;
@@ -353,12 +361,12 @@ impl CfgInterpretter {
         intrinsic(self);
     }
     fn copy_from_to(&mut self, src_ptr: Ptr, dest_ptr: Ptr, size: usize) {
-        let src_range = src_ptr..src_ptr + size;
-        self.memory.copy_within(src_range, dest_ptr);
+        let src_range = src_ptr.0..src_ptr.0 + size;
+        self.memory.copy_within(src_range, dest_ptr.0);
     }
     fn heap_alloc(&mut self, size_align: SizeAlign) -> Ptr {
-        let aligned_ptr = align_val(self.heap_ptr, size_align.align);
-        let new_len = aligned_ptr + size_align.size;
+        let aligned_ptr = Ptr(align_val(self.heap_ptr.0, size_align.align));
+        let new_len = self.add(aligned_ptr, size_align.size);
         self.heap_ptr = new_len;
         aligned_ptr
     }
@@ -366,8 +374,11 @@ impl CfgInterpretter {
         todo!()
     }
 
+    fn alloc_ptr(&self, flay: &FrameLayout, alloc: StackAllocIdx) -> Ptr {
+        self.sub(self.stack_ptr, flay.alloc_offsets[alloc.0])
+    }
     fn reg_ptr(&self, flay: &FrameLayout, reg: RegIdx) -> Ptr {
-        self.stack_ptr - flay.reg_offsets[reg.0]
+        self.sub(self.stack_ptr, flay.reg_offsets[reg.0])
     }
     fn reg_size(&self, flay: &FrameLayout, reg: RegIdx) -> usize {
         flay.reg_sizes[reg.0]
@@ -412,7 +423,7 @@ impl CfgInterpretter {
                     for (field_idx, field) in struct_ty.fields.iter().enumerate() {
                         if field.ident == *field_name {
                             let field_layout = &layout.fields[field_idx];
-                            ptr = ptr + field_layout.offset;
+                            ptr = self.add(ptr, field_layout.offset);
                             size = field_layout.size;
                             ty = field.ty;
                             continue 'main;
@@ -426,7 +437,7 @@ impl CfgInterpretter {
                         .parse::<usize>()
                         .expect("tuple index wasn't an integer?");
                     let field_layout = &layout.fields[field_idx];
-                    ptr = ptr + field_layout.offset;
+                    ptr = self.add(ptr, field_layout.offset);
                     size = field_layout.size;
                     ty = arg_tys[field_idx];
                     continue 'main;
@@ -452,60 +463,66 @@ impl CfgInterpretter {
     }
 
     fn read_bool(&self, src: Ptr) -> bool {
-        self.memory[src] == 1
+        self.memory[src.0] == 1
     }
     fn read_func(&self, src: Ptr) -> (GlobalFuncIdx, Ptr) {
-        let func = GlobalFuncIdx(self.read_ptr(src));
-        let captures = self.read_ptr(src + PTR_SIZE);
+        let func = GlobalFuncIdx(self.read_ptr(src).0);
+        let captures = self.read_ptr(self.add(src, PTR_SIZE));
         (func, captures)
     }
     fn read_ptr(&self, src: Ptr) -> Ptr {
-        self.read_usize(src)
+        Ptr(self.read_usize(src))
     }
     fn read_usize(&self, src: Ptr) -> usize {
         const SIZE: usize = std::mem::size_of::<usize>();
         let mut buf = [0; SIZE];
-        buf.copy_from_slice(&self.memory[src..src + SIZE]);
+        buf.copy_from_slice(&self.memory[src.0..src.0 + SIZE]);
         usize::from_le_bytes(buf)
     }
     fn read_int(&self, src: Ptr) -> i64 {
         const SIZE: usize = std::mem::size_of::<i64>();
         let mut buf = [0; SIZE];
-        buf.copy_from_slice(&self.memory[src..src + SIZE]);
+        buf.copy_from_slice(&self.memory[src.0..src.0 + SIZE]);
         i64::from_le_bytes(buf)
     }
     fn read_str(&self, src: Ptr) -> &str {
         let offset = self.read_ptr(src);
-        let len = self.read_ptr(src + PTR_SIZE);
+        let len = self.read_usize(self.add(src, PTR_SIZE));
 
-        std::str::from_utf8(&self.rodata[offset..offset + len]).unwrap()
+        std::str::from_utf8(&self.rodata[offset.0..offset.0 + len]).unwrap()
     }
 
     fn write_int(&mut self, dest: Ptr, val: i64) {
         let buf = val.to_le_bytes();
         let size = buf.len();
-        self.memory[dest..dest + size].copy_from_slice(&buf);
+        self.memory[dest.0..dest.0 + size].copy_from_slice(&buf);
     }
     fn write_bool(&mut self, dest: Ptr, val: bool) {
-        self.memory[dest] = if val { 1 } else { 0 };
+        self.memory[dest.0] = if val { 1 } else { 0 };
     }
     fn write_func(&mut self, dest: Ptr, val: (GlobalFuncIdx, Ptr)) {
-        self.write_ptr(dest, val.0 .0);
-        self.write_ptr(dest + PTR_SIZE, val.1);
+        self.write_ptr(dest, Ptr(val.0 .0));
+        self.write_ptr(self.add(dest, PTR_SIZE), val.1);
     }
     fn write_ptr(&mut self, dest: Ptr, val: Ptr) {
-        self.write_usize(dest, val);
+        self.write_usize(dest, val.0);
     }
     fn write_usize(&mut self, dest: Ptr, val: usize) {
         let buf = val.to_le_bytes();
         let size = buf.len();
-        self.memory[dest..dest + size].copy_from_slice(&buf);
+        self.memory[dest.0..dest.0 + size].copy_from_slice(&buf);
     }
     fn write_str(&mut self, dest: Ptr, val: &str) {
         let string_start = val.as_ptr() as usize;
         let offset = string_start - self.string_base;
-        self.write_ptr(dest, offset);
-        self.write_ptr(dest + PTR_SIZE, val.len());
+        self.write_ptr(dest, Ptr(offset));
+        self.write_usize(self.add(dest, PTR_SIZE), val.len());
+    }
+    fn add(&self, base: Ptr, offset: usize) -> Ptr {
+        Ptr(base.0 + offset)
+    }
+    fn sub(&self, base: Ptr, offset: usize) -> Ptr {
+        Ptr(base.0 - offset)
     }
 
     fn compute_layouts(&mut self, cfg: &Cfg, ctx: &TyCtx) {
@@ -520,7 +537,7 @@ impl CfgInterpretter {
                 }),
                 Ty::Bool => TyLayout::Primitive(SizeAlign { size: 1, align: 1 }),
                 Ty::Empty => TyLayout::Primitive(SizeAlign { size: 0, align: 1 }),
-                Ty::Ptr => TyLayout::Primitive(SizeAlign {
+                Ty::Box => TyLayout::Primitive(SizeAlign {
                     size: PTR_SIZE,
                     align: PTR_ALIGN,
                 }),
@@ -648,13 +665,24 @@ impl CfgInterpretter {
                 if func.blocks.is_empty() {
                     return self.builtins[func_idx].layout.clone();
                 }
-                let func_args = &func.blocks[0].args;
+                let func_args = func.arg_regs();
                 let func_ty = func.func_ty;
 
                 let mut offset = 0;
                 let mut frame_align = 1;
                 let mut reg_offsets = Vec::new();
+                let mut alloc_offsets = Vec::new();
                 let mut reg_sizes = Vec::new();
+
+                for (_alloc_idx, alloc) in func.stack_allocs.iter().enumerate() {
+                    let alloc_layout = self.layout_of(ctx, *alloc).size_align();
+                    let alloc_offset = align_val(offset, alloc_layout.align);
+
+                    alloc_offsets.push(alloc_offset);
+
+                    offset = alloc_offset + alloc_layout.size;
+                    frame_align = frame_align.max(alloc_layout.align);
+                }
 
                 for (reg_idx, reg) in func.regs.iter().enumerate() {
                     let reg_layout = self.layout_of(ctx, reg.ty).size_align();
@@ -682,6 +710,9 @@ impl CfgInterpretter {
 
                 // Values are currently relative to the "frame pointer"
                 // but we want them relative to stack pointer
+                for offset in &mut alloc_offsets {
+                    *offset = frame_size - *offset;
+                }
                 for offset in &mut reg_offsets {
                     *offset = frame_size - *offset;
                 }
@@ -722,6 +753,7 @@ impl CfgInterpretter {
                 FrameLayout {
                     frame_size,
                     args_size,
+                    alloc_offsets,
                     reg_offsets,
                     reg_sizes,
                     return_offset,
@@ -747,8 +779,26 @@ impl CfgInterpretter {
             self.frame_layouts[func_idx].frame_size += max_arg_size;
             self.frame_layouts[func_idx].return_offset += max_arg_size;
 
+            for alloc_offset in &mut self.frame_layouts[func_idx].alloc_offsets {
+                *alloc_offset += max_arg_size;
+            }
             for reg_offset in &mut self.frame_layouts[func_idx].reg_offsets {
                 *reg_offset += max_arg_size;
+            }
+
+            println!("func {}", func_idx);
+            println!("  allocs:");
+            for (alloc_idx, alloc_offset) in self.frame_layouts[func_idx]
+                .alloc_offsets
+                .iter()
+                .enumerate()
+            {
+                println!("    slot {} @ 0x{:x}", alloc_idx, alloc_offset);
+            }
+            println!("  regs:");
+            for (reg_idx, reg_offset) in self.frame_layouts[func_idx].reg_offsets.iter().enumerate()
+            {
+                println!("    %{} @ 0x{:x}", reg_idx, reg_offset);
             }
         }
     }
@@ -796,13 +846,13 @@ impl CfgInterpretter {
                 let val = self.read_bool(ptr);
                 write!(f, "{}", val)
             }
-            Ty::Ptr => {
+            Ty::Box => {
                 let val = self.read_ptr(ptr);
-                write!(f, "0x{:08x}", val)
+                write!(f, "0x{:08x}", val.0)
             }
             Ty::TypedPtr(_) => {
                 let val = self.read_ptr(ptr);
-                write!(f, "0x{:08x}", val)
+                write!(f, "0x{:08x}", val.0)
             }
             Ty::Empty => {
                 write!(f, "()")
@@ -818,7 +868,7 @@ impl CfgInterpretter {
                     if idx != 0 {
                         write!(f, ", ")?;
                     }
-                    let arg_ptr = ptr + arg_layout.offset;
+                    let arg_ptr = self.add(ptr, arg_layout.offset);
                     // Debug print fields unconditionally to make 0 vs "0" clear
                     self.format_ptr(f, cfg, ctx, arg_ptr, *arg_ty, true, indent)?;
                 }
@@ -836,7 +886,7 @@ impl CfgInterpretter {
                     if idx != 0 {
                         write!(f, ", ")?;
                     }
-                    let field_ptr = ptr + field_layout.offset;
+                    let field_ptr = self.add(ptr, field_layout.offset);
                     write!(f, "{}: ", field.ident)?;
                     // Debug print fields unconditionally to make 0 vs "0" clear
                     self.format_ptr(f, cfg, ctx, field_ptr, field.ty, true, indent)?;
@@ -845,11 +895,11 @@ impl CfgInterpretter {
             }
             Ty::Func { .. } => {
                 let (func_id, captures) = self.read_func(ptr);
-                let func = &cfg.funcs[func_id.0];
+                let func = &cfg.func(func_id);
                 write!(f, "fn #{}_{}", func_id.0, func.func_name)?;
-                if captures != 0 {
-                    let captures_ptr_reg = *func.blocks[0].args.last().unwrap();
-                    let captures_ptr_ty = func.regs[captures_ptr_reg.0].ty;
+                if captures.0 != 0 {
+                    let captures_ptr_reg = *func.arg_regs().last().unwrap();
+                    let captures_ptr_ty = func.reg(captures_ptr_reg).ty;
                     let captures_ty_idx = ctx.pointee_ty(captures_ptr_ty);
                     let captures_ty = ctx.realize_ty(captures_ty_idx);
                     let captures_layout = self.layout_of(ctx, captures_ty_idx);
@@ -861,7 +911,7 @@ impl CfgInterpretter {
                         write!(f, "{:indent$}captures:", "", indent = indent)?;
                         for (capture_ty, capture_layout) in arg_tys.iter().zip(layout.fields.iter())
                         {
-                            let capture_ptr = captures + capture_layout.offset;
+                            let capture_ptr = self.add(captures, capture_layout.offset);
                             writeln!(f, "")?;
                             let sub_indent = indent + 2;
                             write!(f, "{:indent$}- ", "", indent = indent)?;
@@ -917,44 +967,44 @@ fn align_val(val: usize, align: usize) -> usize {
 
 pub fn cfg_builtin_add(interp: &mut CfgInterpretter) {
     let stack_ptr = interp.stack_ptr;
-    let return_val_ptr = stack_ptr - 8;
-    let lhs = interp.read_int(stack_ptr - 16);
-    let rhs = interp.read_int(stack_ptr - 24);
+    let return_val_ptr = interp.sub(stack_ptr, 8);
+    let lhs = interp.read_int(interp.sub(stack_ptr, 16));
+    let rhs = interp.read_int(interp.sub(stack_ptr, 24));
 
     let result = lhs + rhs;
     interp.write_int(return_val_ptr, result);
 }
 pub fn cfg_builtin_sub(interp: &mut CfgInterpretter) {
     let stack_ptr = interp.stack_ptr;
-    let return_val_ptr = stack_ptr - 8;
-    let lhs = interp.read_int(stack_ptr - 16);
-    let rhs = interp.read_int(stack_ptr - 24);
+    let return_val_ptr = interp.sub(stack_ptr, 8);
+    let lhs = interp.read_int(interp.sub(stack_ptr, 16));
+    let rhs = interp.read_int(interp.sub(stack_ptr, 24));
 
     let result = lhs - rhs;
     interp.write_int(return_val_ptr, result);
 }
 pub fn cfg_builtin_mul(interp: &mut CfgInterpretter) {
     let stack_ptr = interp.stack_ptr;
-    let return_val_ptr = stack_ptr - 8;
-    let lhs = interp.read_int(stack_ptr - 16);
-    let rhs = interp.read_int(stack_ptr - 24);
+    let return_val_ptr = interp.sub(stack_ptr, 8);
+    let lhs = interp.read_int(interp.sub(stack_ptr, 16));
+    let rhs = interp.read_int(interp.sub(stack_ptr, 24));
 
     let result = lhs * rhs;
     interp.write_int(return_val_ptr, result);
 }
 pub fn cfg_builtin_eq(interp: &mut CfgInterpretter) {
     let stack_ptr = interp.stack_ptr;
-    let return_val_ptr = stack_ptr - 8;
-    let lhs = interp.read_int(stack_ptr - 16);
-    let rhs = interp.read_int(stack_ptr - 24);
+    let return_val_ptr = interp.sub(stack_ptr, 8);
+    let lhs = interp.read_int(interp.sub(stack_ptr, 16));
+    let rhs = interp.read_int(interp.sub(stack_ptr, 24));
 
     let result = lhs == rhs;
     interp.write_bool(return_val_ptr, result);
 }
 pub fn cfg_builtin_not(interp: &mut CfgInterpretter) {
     let stack_ptr = interp.stack_ptr;
-    let return_val_ptr = stack_ptr - 7;
-    let lhs = interp.read_bool(stack_ptr - 8);
+    let return_val_ptr = interp.sub(stack_ptr, 7);
+    let lhs = interp.read_bool(interp.sub(stack_ptr, 8));
 
     let result = !lhs;
     interp.write_bool(return_val_ptr, result);

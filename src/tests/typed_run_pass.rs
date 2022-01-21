@@ -28,6 +28,104 @@ fn test_basic() {
 }
 
 #[test]
+fn test_cfg_bringup_example() {
+    let program = r#"
+    struct Point {
+        x: Int
+        y: Int
+    }
+    
+    fn square(x:Int)->Int{
+        ret mul(x, x)
+    }
+    
+    let pt = Point { x: 1, y: 3 }
+    let z = 4
+    
+    fn captures() -> Int {
+        ret add(square(pt.x), square(pt.y))
+    }
+    fn super_captures() -> Int {
+        ret sub(captures(), z)
+    }
+    
+    print square(9)
+    print captures()
+    print super_captures()
+    ret 1
+    "#;
+
+    let (result, output) = run_typed(program);
+    assert_eq!(result, 1);
+    assert_eq!(
+        output.unwrap(),
+        r#"81
+10
+6
+"#
+    )
+}
+
+#[test]
+fn test_stack_allocs() {
+    let program = r#"
+    struct Point { 
+        x: Int 
+        y: Int
+    }
+    
+    let mut a = 1
+    let mut b = true
+    let mut c = ()
+    let mut d = "hello"
+    let mut e = Point { x: 3, y: 5 }
+    let mut f = (9, true, 19)
+    
+    print a
+    print b
+    print c
+    print d
+    print e
+    print f
+    
+    set a = 74
+    set b = false
+    set c = ()
+    set d = "bye"
+    set e = Point { x: 12, y: 17 }
+    set f = (20, false, 45)
+    
+    print a
+    print b
+    print c
+    print d
+    print e
+    print f
+    
+    ret 99
+    "#;
+
+    let (result, output) = run_typed(program);
+    assert_eq!(result, 99);
+    assert_eq!(
+        output.unwrap(),
+        r#"1
+true
+()
+hello
+Point { x: 3, y: 5 }
+(9, true, 19)
+74
+false
+()
+bye
+Point { x: 12, y: 17 }
+(20, false, 45)
+"#
+    )
+}
+
+#[test]
 fn test_nested_closure_capture() {
     let program = r#"
         let factor: Int = 3

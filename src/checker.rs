@@ -26,7 +26,7 @@ pub enum Ty<'p> {
     Int,
     Str,
     Bool,
-    Ptr,
+    Box,
     TypedPtr(TyIdx),
     Empty,
     Func {
@@ -380,7 +380,7 @@ impl<'p> TyCtx<'p> {
             Ty::Bool => format!("Bool"),
             Ty::Empty => format!("()"),
             Ty::Unknown => format!("<unknown>"),
-            Ty::Ptr => format!("<opaque ptr>"),
+            Ty::Box => format!("Box"),
             Ty::TypedPtr(pointee_ty) => {
                 let pointee = self.format_ty(*pointee_ty);
                 format!("&{}", pointee)
@@ -455,7 +455,7 @@ impl<'p> Program<'p> {
         ctx.ty_empty = ctx.memoize_inner(Ty::Empty);
         ctx.ty_bool = ctx.memoize_inner(Ty::Bool);
         ctx.ty_int = ctx.memoize_inner(Ty::Int);
-        ctx.ty_ptr = ctx.memoize_inner(Ty::Ptr);
+        ctx.ty_ptr = ctx.memoize_inner(Ty::Box);
 
         // Set up globals (stdlib)
         let builtins = self
@@ -611,7 +611,7 @@ impl<'p> Program<'p> {
 
             let mut prelude = Vec::new();
             for (capture_idx, (_capture_name, capture_temp)) in func.captures.iter().enumerate() {
-                prelude.push(CfgStmt::RegFromVarPath {
+                prelude.push(CfgStmt::Copy {
                     new_reg: capture_temp.reg,
                     src_var: Var::reg(captures_ptr_ty, captures_arg_reg),
                     var_path: vec![FIELD_DEREF, FIELD_TUPLE[capture_idx]],
@@ -627,7 +627,7 @@ impl<'p> Program<'p> {
 
         ctx.envs.pop();
         assert!(
-            cfg.func().loops.is_empty(),
+            cfg.cur_func().loops.is_empty(),
             "Internal Compiler Error: Loops were not popped!"
         );
         cfg.pop_global_func();
@@ -794,7 +794,7 @@ impl<'p> Program<'p> {
                             var_path: vec![FIELD_DEREF],
                         });
                         let new_reg = cfg.push_reg(func_ty);
-                        cfg.bb(bb).stmts.push(CfgStmt::RegFromClosure {
+                        cfg.bb(bb).stmts.push(CfgStmt::Closure {
                             new_reg,
                             global_func,
                             captures_reg: box_reg,
@@ -820,11 +820,13 @@ impl<'p> Program<'p> {
                     // it has been completely shadowed and can never be referenced again.
 
                     let new_var = if *is_mut {
-                        let alloca_ty = ctx.memoize_inner(Ty::TypedPtr(expr_temp.ty));
-                        let alloca_reg = cfg.push_reg(alloca_ty);
+                        let ptr_ty = ctx.memoize_inner(Ty::TypedPtr(expr_temp.ty));
+                        let alloca_reg = cfg.push_reg(ptr_ty);
+                        let stack_alloc = cfg.push_stack_alloc(expr_temp.ty);
                         let new_var = Var::alloca(expr_temp.ty, alloca_reg);
                         cfg.bb(bb).stmts.push(CfgStmt::StackAlloc {
                             new_reg: alloca_reg,
+                            alloc: stack_alloc,
                         });
 
                         cfg.bb(bb).stmts.push(CfgStmt::Set {
@@ -968,7 +970,7 @@ impl<'p> Program<'p> {
             Expr::Lit(lit) => {
                 let ty = ctx.memoize_ty(self, &lit.ty());
                 let new_reg = cfg.push_reg(ty);
-                cfg.bb(bb).stmts.push(CfgStmt::RegFromLit {
+                cfg.bb(bb).stmts.push(CfgStmt::Lit {
                     new_reg,
                     lit: lit.clone(),
                 });
@@ -1017,7 +1019,7 @@ impl<'p> Program<'p> {
                             var_path.fields.clone()
                         };
                         let new_reg = cfg.push_reg(ty);
-                        cfg.bb(bb).stmts.push(CfgStmt::RegFromVarPath {
+                        cfg.bb(bb).stmts.push(CfgStmt::Copy {
                             new_reg,
                             src_var,
                             var_path,
@@ -1310,6 +1312,7 @@ pub struct FuncCfg<'p> {
 
     pub blocks: Vec<BasicBlock<'p>>,
     pub regs: Vec<RegDecl>,
+    pub stack_allocs: Vec<TyIdx>,
 
     // Transient state, only used while building the CFG
     // (loop_bb, post_loop_bb)
@@ -1336,16 +1339,16 @@ pub enum CfgStmt<'p> {
         else_block: BasicBlockJmp,
     },
     Jump(BasicBlockJmp),
-    RegFromVarPath {
+    Copy {
         new_reg: RegIdx,
         src_var: Var,
         var_path: Vec<&'p str>,
     },
-    RegFromLit {
+    Lit {
         new_reg: RegIdx,
         lit: Literal<'p>,
     },
-    RegFromClosure {
+    Closure {
         new_reg: RegIdx,
         global_func: GlobalFuncIdx,
         captures_reg: RegIdx,
@@ -1366,6 +1369,7 @@ pub enum CfgStmt<'p> {
     },
     StackAlloc {
         new_reg: RegIdx,
+        alloc: StackAllocIdx,
     },
     HeapAlloc {
         new_reg: RegIdx,
@@ -1391,6 +1395,8 @@ pub enum CfgStmt<'p> {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct RegIdx(pub usize);
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct StackAllocIdx(pub usize);
 #[derive(Debug, Copy, Clone)]
 pub struct BasicBlockIdx(pub usize);
 #[derive(Debug, Copy, Clone)]
@@ -1404,15 +1410,23 @@ pub struct RegDecl {
 }
 
 impl<'p> Cfg<'p> {
+    /// Pushes a reg into cur_func, and returns its idx
     fn push_reg(&mut self, ty: TyIdx) -> RegIdx {
-        let cur_func = self.func();
+        let cur_func = self.cur_func();
         cur_func.regs.push(RegDecl { ty });
 
         RegIdx(cur_func.regs.len() - 1)
     }
+    /// Pushes an alloc into cur_func, and returns its idx
+    fn push_stack_alloc(&mut self, ty: TyIdx) -> StackAllocIdx {
+        let cur_func = self.cur_func();
+        cur_func.stack_allocs.push(ty);
 
+        StackAllocIdx(cur_func.stack_allocs.len() - 1)
+    }
+    /// Pushes a basic block into cur_func, and returns its idx
     fn push_basic_block(&mut self) -> BasicBlockIdx {
-        let cur_func = self.func();
+        let cur_func = self.cur_func();
         cur_func.blocks.push(BasicBlock {
             args: Vec::new(),
             stmts: Vec::new(),
@@ -1420,21 +1434,21 @@ impl<'p> Cfg<'p> {
 
         BasicBlockIdx(cur_func.blocks.len() - 1)
     }
-
+    /// Pushes a loop into scope for cur_func
     fn push_loop(&mut self, loop_bb: BasicBlockIdx, post_loop_bb: BasicBlockIdx) {
-        self.func().loops.push((loop_bb, post_loop_bb));
+        self.cur_func().loops.push((loop_bb, post_loop_bb));
     }
-
+    /// Gets the current loop in scope for cur_func
     fn cur_loop(&mut self) -> (BasicBlockIdx, BasicBlockIdx) {
-        *self.func().loops.last().unwrap()
+        *self.cur_func().loops.last().unwrap()
     }
-
+    /// Pops a loop from scope for cur_func
     fn pop_loop(&mut self) {
-        self.func().loops.pop();
+        self.cur_func().loops.pop();
     }
-
+    /// Gets a bb from cur_func
     fn bb(&mut self, bb_idx: BasicBlockIdx) -> &mut BasicBlock<'p> {
-        &mut self.func().blocks[bb_idx.0]
+        &mut self.cur_func().blocks[bb_idx.0]
     }
 
     fn push_global_func(
@@ -1447,6 +1461,7 @@ impl<'p> Cfg<'p> {
             func_name,
             func_arg_names,
             func_ty,
+            stack_allocs: Vec::new(),
             blocks: Vec::new(),
             regs: Vec::new(),
             loops: Vec::new(),
@@ -1457,7 +1472,7 @@ impl<'p> Cfg<'p> {
         idx
     }
 
-    fn func(&mut self) -> &mut FuncCfg<'p> {
+    fn cur_func(&mut self) -> &mut FuncCfg<'p> {
         let cur_func = *self.func_stack.last().unwrap();
         &mut self.funcs[cur_func.0]
     }
@@ -1470,6 +1485,15 @@ impl<'p> Cfg<'p> {
         self.nominals.push(struct_ty);
 
         GlobalNominalIdx(self.nominals.len() - 1)
+    }
+
+    /// Gets a global func
+    pub fn func(&self, func_idx: GlobalFuncIdx) -> &FuncCfg<'p> {
+        &self.funcs[func_idx.0]
+    }
+    /// Gets a global nominal
+    pub fn nominal(&self, idx: GlobalNominalIdx) -> TyIdx {
+        self.nominals[idx.0]
     }
 
     pub fn format(&self, ctx: &TyCtx<'p>) -> Result<String, std::fmt::Error> {
@@ -1507,7 +1531,7 @@ impl<'p> Cfg<'p> {
                     if arg_idx != 0 {
                         write!(f, ", ")?;
                     }
-                    let arg_reg = &func.regs[arg_reg_idx.0];
+                    let arg_reg = &func.reg(*arg_reg_idx);
                     write!(
                         f,
                         "%{}_{}: {}",
@@ -1525,6 +1549,18 @@ impl<'p> Cfg<'p> {
 }
 
 impl<'p> FuncCfg<'p> {
+    pub fn reg(&self, idx: RegIdx) -> &RegDecl {
+        &self.regs[idx.0]
+    }
+    // pub fn stack_alloc(&self, idx: StackAllocIdx) -> TyIdx {
+    //    self.stack_allocs[idx.0]
+    // }
+    pub fn block(&self, idx: BasicBlockIdx) -> &BasicBlock {
+        &self.blocks[idx.0]
+    }
+    pub fn arg_regs(&self) -> &[RegIdx] {
+        &self.blocks[0].args
+    }
     fn format<F: std::fmt::Write>(
         &self,
         f: &mut F,
@@ -1559,7 +1595,7 @@ impl<'p> FuncCfg<'p> {
                         block.format(f)?;
                         writeln!(f)?;
                     }
-                    CfgStmt::RegFromVarPath {
+                    CfgStmt::Copy {
                         new_reg,
                         src_var,
                         var_path,
@@ -1569,7 +1605,7 @@ impl<'p> FuncCfg<'p> {
                                 write!(f, "    %{} = %{}", new_reg.0, reg.0)?;
                             }
                             Var::GlobalFunc { global_func, .. } => {
-                                let func = &cfg.funcs[global_func.0];
+                                let func = &cfg.func(*global_func);
                                 write!(
                                     f,
                                     "    %{} = #fn{}_{}",
@@ -1582,15 +1618,15 @@ impl<'p> FuncCfg<'p> {
                         }
                         writeln!(f)?;
                     }
-                    CfgStmt::RegFromLit { new_reg, lit } => {
+                    CfgStmt::Lit { new_reg, lit } => {
                         writeln!(f, "    %{} = {:?}", new_reg.0, lit)?;
                     }
-                    CfgStmt::RegFromClosure {
+                    CfgStmt::Closure {
                         new_reg,
                         global_func,
                         captures_reg,
                     } => {
-                        let func = &cfg.funcs[global_func.0];
+                        let func = &cfg.func(*global_func);
                         writeln!(
                             f,
                             "    %{} = [closure](#fn{}_{}, %{})",
@@ -1610,7 +1646,7 @@ impl<'p> FuncCfg<'p> {
                                 write!(f, "    %{} = (%{}.*)(", new_reg.0, reg.0)?;
                             }
                             Var::GlobalFunc { global_func, .. } => {
-                                let func = &cfg.funcs[global_func.0];
+                                let func = &cfg.func(*global_func);
                                 write!(
                                     f,
                                     "    %{} = #fn{}_{}(",
@@ -1626,8 +1662,8 @@ impl<'p> FuncCfg<'p> {
                         }
                         writeln!(f, ")")?;
                     }
-                    CfgStmt::StackAlloc { new_reg } => {
-                        writeln!(f, "    %{} = stack_alloc()", new_reg.0)?;
+                    CfgStmt::StackAlloc { new_reg, alloc } => {
+                        writeln!(f, "    %{} = stack_alloc() (slot {})", new_reg.0, alloc.0)?;
                     }
                     CfgStmt::StackDealloc { src_reg } => {
                         writeln!(f, "    stack_dealloc({})", src_reg.0)?;
@@ -1677,7 +1713,7 @@ impl<'p> FuncCfg<'p> {
                         new_reg,
                         fields,
                     } => {
-                        let ty_idx = cfg.nominals[nominal.0];
+                        let ty_idx = cfg.nominal(*nominal);
                         let ty = ctx.realize_ty(ty_idx);
                         if let Ty::NamedStruct(struct_decl) = ty {
                             write!(

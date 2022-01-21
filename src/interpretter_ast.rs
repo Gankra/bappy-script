@@ -255,10 +255,13 @@ impl<'p> Program<'p> {
         self.cur_eval_span = expr.span;
         match &expr.code {
             Expr::Call {
-                func: func_name,
+                func: func_path,
                 args,
             } => {
-                let func = self.eval_resolve_var(func_name, envs).clone();
+                let base_val = self.eval_resolve_var(func_path.ident, envs);
+                let func = self
+                    .eval_resolve_var_path(base_val, &func_path.fields, expr.span)
+                    .clone();
                 let evaled_args = args
                     .iter()
                     .map(|expr| self.eval_expr_ast(expr, envs))
@@ -274,7 +277,7 @@ impl<'p> Program<'p> {
                         self.error(
                             format!(
                                 "Runtime Error: Tried to call a non-function {}: {}",
-                                func_name, val,
+                                func_path.ident, val,
                             ),
                             expr.span,
                         )

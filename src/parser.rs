@@ -131,7 +131,7 @@ pub struct Expression<'p> {
 #[derive(Debug, Clone)]
 pub enum Expr<'p> {
     Call {
-        func: &'p str,
+        func: VarPath<'p>,
         args: Vec<Expression<'p>>,
     },
     Lit(Literal<'p>),
@@ -570,7 +570,7 @@ fn expr(i: &str) -> IResult<&str, Expression> {
 }
 
 fn expr_call(i: &str) -> IResult<&str, Expr> {
-    let (i, func) = ident(i)?;
+    let (i, func) = var_path(i)?;
     let (i, _) = space0(i)?;
     let (i, _) = tag("(")(i)?;
     let (i, _) = space0(i)?;

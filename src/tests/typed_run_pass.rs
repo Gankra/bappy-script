@@ -28,6 +28,43 @@ fn test_basic() {
 }
 
 #[test]
+fn test_func_names_are_paths() {
+    let program = r#"
+    fn do_a_compy(x: Int) -> Int {
+        ret mul(x, x)
+    }
+    let z = 5
+    fn captured_do_a_compy(x: Int) -> Int {
+        ret do_a_compy(add(x, z))
+    }
+    struct MyClosure {
+        func: fn(Int) -> Int
+        capture: Int
+    }
+    fn call_closure(close: MyClosure) -> Int {
+        ret close.func(close.capture)
+    }
+    
+    let close1 = MyClosure { func: do_a_compy, capture: 7 }
+    let close2 = MyClosure { func: captured_do_a_compy, capture: 9 }
+    
+    print call_closure(close1)
+    print call_closure(close2)
+    
+    ret close2.capture
+    "#;
+
+    let (result, output) = run_typed(program);
+    assert_eq!(result, 9);
+    assert_eq!(
+        output.unwrap(),
+        r#"49
+196
+"#
+    )
+}
+
+#[test]
 fn test_cfg_bringup_example() {
     let program = r#"
     struct Point {

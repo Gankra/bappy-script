@@ -177,26 +177,25 @@ impl CfgInterpretter {
                     }
                     CfgStmt::Call {
                         new_reg,
-                        func,
+                        func: callee,
+                        func_ty: _,
                         args,
                     } => {
                         let size = self.reg_size(&flay, *new_reg);
                         let new_reg_ptr = self.reg_ptr(&flay, *new_reg);
 
-                        let (callee_func_ty, (callee_func_idx, captures_ptr)) = match func {
-                            Var::Alloca { ty, reg } => {
-                                // Need to walk through an extra level of indirection.
-                                // Ideally `call` would just have a VarPath so that this
-                                // could be pre-handled like RegFromVarPath.
-                                let reg_ptr = self.reg_ptr(&flay, *reg);
-                                let func_ptr = self.read_ptr(reg_ptr);
-                                (*ty, self.read_func(func_ptr))
+                        let (callee_func_ty, (callee_func_idx, captures_ptr)) = match callee {
+                            CfgVarPath::Reg(reg, var_path) => {
+                                let base_ty = func.reg(*reg).ty;
+                                let base_ptr = self.reg_ptr(&flay, *reg);
+                                let (src_ptr, callee_ty, _size) =
+                                    self.resolve_var_path(cfg, ctx, base_ptr, base_ty, var_path);
+                                (callee_ty, self.read_func(src_ptr))
                             }
-                            Var::Reg { ty, reg } => {
-                                let reg_ptr = self.reg_ptr(&flay, *reg);
-                                (*ty, self.read_func(reg_ptr))
+                            CfgVarPath::GlobalFunc(callee) => {
+                                let callee_ty = cfg.func(*callee).func_ty;
+                                (callee_ty, (*callee, Ptr(0)))
                             }
-                            Var::GlobalFunc { ty, global_func } => (*ty, (*global_func, Ptr(0))),
                         };
                         let callee_abi =
                             if let TyLayout::Func(func_layout) = &self.ty_layouts[callee_func_ty] {
@@ -233,28 +232,17 @@ impl CfgInterpretter {
                             Literal::Empty(()) => { /* noop */ }
                         }
                     }
-                    CfgStmt::Copy {
-                        new_reg,
-                        src_var,
-                        var_path,
-                    } => {
+                    CfgStmt::Copy { new_reg, src_var } => {
                         let dest_ptr = self.reg_ptr(&flay, *new_reg);
                         match src_var {
-                            Var::Alloca { reg, .. } | Var::Reg { reg, .. } => {
-                                // In the current implementation, Alloca and Reg are the same
-                                let base_ty = func.regs[reg.0].ty;
-                                if var_path.is_empty() {
-                                    let src_ptr = self.reg_ptr(&flay, *reg);
-                                    let size = self.reg_size(&flay, *reg);
-                                    self.copy_from_to(src_ptr, dest_ptr, size);
-                                } else {
-                                    let base_ptr = self.reg_ptr(&flay, *reg);
-                                    let (src_ptr, size) = self
-                                        .resolve_var_path(cfg, ctx, base_ptr, base_ty, var_path);
-                                    self.copy_from_to(src_ptr, dest_ptr, size);
-                                }
+                            CfgVarPath::Reg(reg, var_path) => {
+                                let base_ty = func.reg(*reg).ty;
+                                let base_ptr = self.reg_ptr(&flay, *reg);
+                                let (src_ptr, _src_ty, size) =
+                                    self.resolve_var_path(cfg, ctx, base_ptr, base_ty, var_path);
+                                self.copy_from_to(src_ptr, dest_ptr, size);
                             }
-                            Var::GlobalFunc { global_func, .. } => {
+                            CfgVarPath::GlobalFunc(global_func) => {
                                 self.write_func(dest_ptr, (*global_func, Ptr(0)));
                             }
                         }
@@ -320,28 +308,17 @@ impl CfgInterpretter {
                         let alloc = self.read_ptr(src_ptr);
                         self.heap_dealloc(alloc);
                     }
-                    CfgStmt::Set {
-                        dest_var,
-                        src_reg,
-                        var_path,
-                    } => {
+                    CfgStmt::Set { dest_var, src_reg } => {
                         let src_ptr = self.reg_ptr(&flay, *src_reg);
                         match dest_var {
-                            Var::Alloca { reg, .. } | Var::Reg { reg, .. } => {
-                                // In the current implementation these are the same
-                                let base_ty = func.regs[reg.0].ty;
-                                if var_path.is_empty() {
-                                    let dest_ptr = self.reg_ptr(&flay, *reg);
-                                    let size = self.reg_size(&flay, *reg);
-                                    self.copy_from_to(src_ptr, dest_ptr, size);
-                                } else {
-                                    let base_ptr = self.reg_ptr(&flay, *reg);
-                                    let (dest_ptr, size) = self
-                                        .resolve_var_path(cfg, ctx, base_ptr, base_ty, var_path);
-                                    self.copy_from_to(src_ptr, dest_ptr, size);
-                                }
+                            CfgVarPath::Reg(reg, var_path) => {
+                                let base_ty = func.reg(*reg).ty;
+                                let base_ptr = self.reg_ptr(&flay, *reg);
+                                let (dest_ptr, _dest_ty, size) =
+                                    self.resolve_var_path(cfg, ctx, base_ptr, base_ty, var_path);
+                                self.copy_from_to(src_ptr, dest_ptr, size);
                             }
-                            Var::GlobalFunc { .. } => {
+                            CfgVarPath::GlobalFunc { .. } => {
                                 panic!("Tried to set a global function!?");
                             }
                         }
@@ -427,7 +404,7 @@ impl CfgInterpretter {
         base_ptr: Ptr,
         base_ty: TyIdx,
         var_path: &[CfgPathPart],
-    ) -> (Ptr, usize) {
+    ) -> (Ptr, TyIdx, usize) {
         // println!("resolving var path at 0x{:08x}", base_ptr);
         let mut ptr = base_ptr;
         let mut ty = base_ty;
@@ -470,7 +447,7 @@ impl CfgInterpretter {
         // self.format_ptr(&mut f, cfg, ctx, ptr, ty, false, 0).unwrap();
         // println!("varpath: {:?} = *0x{:08x} = {}", var_path, ptr, f);
 
-        (ptr, size)
+        (ptr, ty, size)
     }
 
     fn read_bool(&self, src: Ptr) -> bool {
@@ -777,8 +754,11 @@ impl CfgInterpretter {
             let mut max_arg_size = 0;
             for block in &func.blocks {
                 for stmt in &block.stmts {
-                    if let CfgStmt::Call { func, .. } = stmt {
-                        if let TyLayout::Func(func_layout) = self.layout_of(ctx, func.ty()) {
+                    if let CfgStmt::Call {
+                        func_ty: callee_ty, ..
+                    } = stmt
+                    {
+                        if let TyLayout::Func(func_layout) = self.layout_of(ctx, *callee_ty) {
                             max_arg_size = max_arg_size.max(func_layout.abi.args_size);
                         } else {
                             unreachable!("non-function was called?");

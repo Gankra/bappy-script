@@ -19,14 +19,15 @@ expression: cfg
     jmp bb1()
 
   bb1():
-    %3 = %2.*
-    %4 = Int(0)
-    %5 = #fn3_eq(%3, %4)
-    cond %5: bb3(), bb4()
+    %3 = #fn3_eq
+    %4 = %2.*
+    %5 = Int(0)
+    %6 = (%3)(%4, %5)
+    cond %6: bb3(), bb4()
 
   bb2():
-    %13 = Int(0)
-    ret %13
+    %15 = Int(0)
+    ret %15
 
   bb3():
     jmp bb2()
@@ -36,22 +37,23 @@ expression: cfg
     jmp bb5()
 
   bb5():
-    %6 = %2.*
-    %7 = Int(1)
-    %8 = #fn1_sub(%6, %7)
-    %2.* = %8
-    %9 = %2.*
-    print %9
+    %7 = #fn1_sub
+    %8 = %2.*
+    %9 = Int(1)
+    %10 = (%7)(%8, %9)
+    %2.* = %10
+    %11 = %2.*
+    print %11
     jmp bb6()
 
   bb6():
-    %10 = Str("hello")
-    print %10
+    %12 = Str("hello")
+    print %12
     cond %0: bb8(), bb9()
 
   bb7():
-    %12 = Str("looped!")
-    print %12
+    %14 = Str("looped!")
+    print %14
     jmp bb1()
 
   bb8():
@@ -63,8 +65,8 @@ expression: cfg
     jmp bb10()
 
   bb10():
-    %11 = Str("unreachable")
-    print %11
+    %13 = Str("unreachable")
+    print %13
     jmp bb6()
 
 

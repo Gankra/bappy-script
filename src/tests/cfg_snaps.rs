@@ -85,3 +85,34 @@ fn loop_basics() {
     let cfg = dump_cfg(program);
     insta::assert_snapshot!("loop_basics", cfg);
 }
+
+#[test]
+fn func_names_are_paths() {
+    let program = r#"
+    fn do_a_compy(x: Int) -> Int {
+        ret mul(x, x)
+    }
+    let z = 5
+    fn captured_do_a_compy(x: Int) -> Int {
+        ret do_a_compy(add(x, z))
+    }
+    struct MyClosure {
+        func: fn(Int) -> Int
+        capture: Int
+    }
+    fn call_closure(close: MyClosure) -> Int {
+        ret close.func(close.capture)
+    }
+    
+    let close1 = MyClosure { func: do_a_compy, capture: 7 }
+    let close2 = MyClosure { func: captured_do_a_compy, capture: 9 }
+    
+    print call_closure(close1)
+    print call_closure(close2)
+    
+    ret close2.capture
+    "#;
+
+    let cfg = dump_cfg(program);
+    insta::assert_snapshot!("func_names_are_paths", cfg);
+}

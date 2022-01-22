@@ -606,6 +606,79 @@ fn test_set_basic() {
 }
 
 #[test]
+fn test_func_names_are_paths() {
+    let program = r#"
+    fn do_a_compy(x: Int) -> Int {
+        ret mul(x, x)
+    }
+    let z = 5
+    fn captured_do_a_compy(x: Int) -> Int {
+        ret do_a_compy(add(x, z))
+    }
+    struct MyClosure {
+        func: fn(Int) -> Int
+        capture: Int
+    }
+    fn call_closure(close: MyClosure) -> Int {
+        // This is the key line we're really testing
+        ret close.func(close.capture)
+    }
+    
+    let close1 = MyClosure { func: do_a_compy, capture: 7 }
+    let close2 = MyClosure { func: captured_do_a_compy, capture: 9 }
+    
+    print call_closure(close1)
+    print call_closure(close2)
+    
+    ret close2.capture
+    "#;
+
+    let (result, output) = run(program);
+    assert_eq!(result, 9);
+    assert_eq!(
+        output.unwrap(),
+        r#"49
+196
+"#
+    )
+}
+
+#[test]
+fn test_func_path_capture() {
+    let program = r#"
+    let y = 3
+    fn normal(x: Int) -> Bool {
+        ret eq(x, 24)
+    }
+    fn captures(x: Int) -> Int {
+        ret mul(x, y)
+    }
+    let tup = (normal, captures)
+
+    fn captures_tup() -> Int {
+        // Check that these function calls trigger the vars to be captured
+        let cond = tup.0(24)
+        let b = tup.1(7)
+
+        if cond {
+            print b
+        }
+        ret b
+    }
+
+    ret captures_tup()
+    "#;
+
+    let (result, output) = run(program);
+    assert_eq!(result, 21);
+    assert_eq!(
+        output.unwrap(),
+        r#"21
+"#
+    )
+}
+
+#[test]
 fn test_aggregates_basic() {
     let program = r#"
         let mut factors: (Int, Bool) = (0, true)

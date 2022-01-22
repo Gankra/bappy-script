@@ -978,7 +978,7 @@ impl<'p> Program<'p> {
                 return Reg::new(ty, new_reg);
             }
             Expr::VarPath(var_path) => {
-                return self.get_var_path(ctx, cfg, var_path, captures, bb, expr.span);
+                return self.get_var_path_as_reg(ctx, cfg, var_path, captures, bb, expr.span);
             }
             Expr::Tuple(args) => {
                 let mut arg_regs = Vec::new();
@@ -1071,9 +1071,9 @@ impl<'p> Program<'p> {
                 }
             }
             Expr::Call { func, args } => {
-                let func_reg = self.get_var_path(ctx, cfg, func, captures, bb, expr.span);
+                let (func_path, func_ty_idx) =
+                    self.get_var_path_as_cfg_path(ctx, cfg, func, captures, bb, expr.span);
 
-                let func_ty_idx = func_reg.ty;
                 let func_ty = ctx.realize_ty(func_ty_idx).clone();
                 let (arg_tys, return_ty) = if let Ty::Func { arg_tys, return_ty } = func_ty {
                     (arg_tys.clone(), return_ty)
@@ -1108,7 +1108,7 @@ impl<'p> Program<'p> {
                 let new_reg = cfg.push_reg(return_ty);
                 cfg.bb(bb).stmts.push(CfgStmt::Call {
                     new_reg,
-                    func: CfgVarPath::Reg(func_reg.reg, Vec::new()),
+                    func: func_path,
                     func_ty: func_ty_idx,
                     args: arg_regs,
                 });
@@ -1154,6 +1154,9 @@ NOTE: the types look the same, but the named types have different decls!"#,
         needs_deref: bool,
         span: Span,
     ) -> (TyIdx, Vec<CfgPathPart>) {
+        if !self.typed {
+            return (ctx.ty_unknown, Vec::new());
+        }
         let mut cur_ty = root_ty;
         let mut out_path = Vec::new();
         if needs_deref {
@@ -1209,7 +1212,7 @@ NOTE: the types look the same, but the named types have different decls!"#,
         (cur_ty, out_path)
     }
 
-    fn get_var_path(
+    fn get_var_path_as_reg(
         &mut self,
         ctx: &mut TyCtx<'p>,
         cfg: &mut Cfg<'p>,
@@ -1244,6 +1247,10 @@ NOTE: the types look the same, but the named types have different decls!"#,
                 }
             }
 
+            if !self.typed {
+                return Reg::new(ctx.ty_unknown, RegIdx(0));
+            }
+
             let needs_temp = src_var.needs_temp() || !var_path.fields.is_empty();
             let is_alloca = matches!(src_var, Var::Alloca { .. });
             let (final_ty, var_path) =
@@ -1269,6 +1276,69 @@ NOTE: the types look the same, but the named types have different decls!"#,
                         src_var: CfgVarPath::GlobalFunc(global_func),
                     });
                     return Reg::new(final_ty, new_reg);
+                }
+            }
+        } else {
+            self.error(
+                format!(
+                    "Compile Error: Use of undefined variable '{}'",
+                    var_path.ident
+                ),
+                span,
+            )
+        }
+    }
+
+    fn get_var_path_as_cfg_path(
+        &mut self,
+        ctx: &mut TyCtx<'p>,
+        cfg: &mut Cfg<'p>,
+        var_path: &VarPath<'p>,
+        captures: &mut Vec<BTreeMap<&'p str, Reg>>,
+        _bb: BasicBlockIdx,
+        span: Span,
+    ) -> (CfgVarPath, TyIdx) {
+        if let Some(var) = ctx.resolve_var(var_path.ident) {
+            let capture_depth = var.capture_depth;
+            let mut src_var = var.entry.get().clone();
+            let is_global_func = matches!(src_var, Var::GlobalFunc { .. });
+
+            // Don't capture global function pointers
+            if !is_global_func {
+                for (captures, depth) in captures.iter_mut().rev().zip(0..capture_depth) {
+                    let capture_temp = captures.entry(var_path.ident).or_insert_with(|| {
+                        let func_idx = cfg.funcs.len() - depth - 1;
+                        let func = &mut cfg.funcs[func_idx];
+                        let capture_ty = src_var.ty();
+                        func.regs.push(RegDecl { ty: capture_ty });
+                        let capture_reg = RegIdx(func.regs.len() - 1);
+                        Reg {
+                            ty: capture_ty,
+                            reg: capture_reg,
+                        }
+                    });
+
+                    if depth == 0 {
+                        src_var = Var::reg(capture_temp.ty, capture_temp.reg);
+                    }
+                }
+            }
+
+            if !self.typed {
+                return (CfgVarPath::Reg(RegIdx(0), Vec::new()), ctx.ty_unknown);
+            }
+
+            let _needs_temp = src_var.needs_temp() || !var_path.fields.is_empty();
+            let is_alloca = matches!(src_var, Var::Alloca { .. });
+            let (final_ty, var_path) =
+                self.resolve_var_path(ctx, src_var.ty(), &var_path.fields, is_alloca, span);
+
+            match src_var {
+                Var::Alloca { reg, .. } | Var::Reg { reg, .. } => {
+                    (CfgVarPath::Reg(reg, var_path), final_ty)
+                }
+                Var::GlobalFunc { global_func, .. } => {
+                    (CfgVarPath::GlobalFunc(global_func), final_ty)
                 }
             }
         } else {

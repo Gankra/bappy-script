@@ -1,0 +1,63 @@
+---
+source: src/tests/cfg_snaps.rs
+assertion_line: 118
+expression: cfg
+
+---
+#struct0_MyClosure {
+  func: fn (Int) -> Int
+  capture: Int
+}
+
+#struct1_MyClosure {
+  func: fn (Int) -> Int
+  capture: Int
+}
+
+[intrinsic] #fn0_add(lhs, rhs)
+[intrinsic] #fn1_sub(lhs, rhs)
+[intrinsic] #fn2_mul(lhs, rhs)
+[intrinsic] #fn3_eq(lhs, rhs)
+[intrinsic] #fn4_not(rhs)
+
+#fn5_main():
+  bb0():
+    %0 = Int(5)
+    %1 = (%0,)
+    %2 = heap_alloc()
+    %2.* = %1
+    %3 = [closure](#fn7_captured_do_a_compy, %2)
+    %4 = #fn6_do_a_compy
+    %5 = Int(7)
+    %6 = #struct0_MyClosure{ 0: %4, 1: %5 }
+    %7 = Int(9)
+    %8 = #struct1_MyClosure{ 0: %3, 1: %7 }
+    %9 = #fn8_call_closure(%6)
+    print %9
+    %10 = #fn8_call_closure(%8)
+    print %10
+    %11 = %8.1
+    ret %11
+
+
+#fn6_do_a_compy(%0_x: Int):
+  bb0(%0):
+    %1 = #fn2_mul(%0, %0)
+    ret %1
+
+
+#fn7_captured_do_a_compy(%0_x: Int, %4_[closure]: &(Int,)):
+  bb0(%0, %4):
+    %1 = %4.*.0
+    %2 = #fn0_add(%0, %1)
+    %3 = #fn6_do_a_compy(%2)
+    ret %3
+
+
+#fn8_call_closure(%0_close: MyClosure):
+  bb0(%0):
+    %1 = %0.1
+    %2 = (%0.0)(%1)
+    ret %2
+
+

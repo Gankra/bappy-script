@@ -42,6 +42,7 @@ fn test_func_names_are_paths() {
         capture: Int
     }
     fn call_closure(close: MyClosure) -> Int {
+        // This is the key line we're really testing
         ret close.func(close.capture)
     }
     
@@ -60,6 +61,41 @@ fn test_func_names_are_paths() {
         output.unwrap(),
         r#"49
 196
+"#
+    )
+}
+
+#[test]
+fn test_func_path_capture() {
+    let program = r#"
+    let y = 3
+    fn normal(x: Int) -> Bool {
+        ret eq(x, 24)
+    }
+    fn captures(x: Int) -> Int {
+        ret mul(x, y)
+    }
+    let tup = (normal, captures)
+
+    fn captures_tup() -> Int {
+        // Check that these function calls trigger the vars to be captured
+        let cond = tup.0(24)
+        let b = tup.1(7)
+
+        if cond {
+            print b
+        }
+        ret b
+    }
+
+    ret captures_tup()
+    "#;
+
+    let (result, output) = run_typed(program);
+    assert_eq!(result, 21);
+    assert_eq!(
+        output.unwrap(),
+        r#"21
 "#
     )
 }

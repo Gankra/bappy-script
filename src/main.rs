@@ -14,28 +14,33 @@ mod passes;
 
 // The program that will be run with `cargo run`
 const MAIN_PROGRAM: &str = r#"
-fn do_a_compy(x: Int) -> Int {
-    ret mul(x, x)
+let factor: Int = 3
+fn get_factor() -> Int {
+    ret factor
 }
-let z = 5
-fn captured_do_a_compy(x: Int) -> Int {
-    ret do_a_compy(add(x, z))
-}
-struct MyClosure {
-    func: fn(Int) -> Int
-    capture: Int
-}
-fn call_closure(close: MyClosure) -> Int {
-    ret close.func(close.capture)
+print get_factor()
+fn multi(factory: fn() -> Int, x: Int) -> Int {
+    print x
+    print factory()
+    ret mul(x, factory())
 }
 
-let close1 = MyClosure { func: do_a_compy, capture: 7 }
-let close2 = MyClosure { func: captured_do_a_compy, capture: 9 }
+let x: Int = 7
 
-print call_closure(close1)
-print call_closure(close2)
+print multi(get_factor, x)  
 
-ret close2.capture
+
+fn mega_multi(multiplier: fn(fn() -> Int, Int) -> Int) -> () {
+    fn eleven() -> Int {
+        ret 11
+    }
+    print multiplier(eleven, 9)
+    ret ()
+}
+
+let _: () = mega_multi(multi)
+
+ret 0
 "#;
 
 fn main() {

@@ -149,7 +149,8 @@ impl CfgInterpretter {
 
         'eval_loop: loop {
             let block = &func.block(cur_block);
-            for stmt in &block.stmts {
+            let mut jump = None;
+            'block_loop: for stmt in &block.stmts {
                 match stmt {
                     CfgStmt::Branch {
                         cond,
@@ -165,13 +166,15 @@ impl CfgInterpretter {
                         continue 'eval_loop;
                     }
                     CfgStmt::Jump(block) => {
-                        cur_block = block.block_id;
-                        continue 'eval_loop;
+                        jump = Some(block);
+                        break 'block_loop;
                     }
-                    CfgStmt::Return { src_reg } => {
+                    CfgStmt::SetReturn { src_reg } => {
                         let size = self.reg_size(&flay, *src_reg);
                         let src_ptr = self.reg_ptr(&flay, *src_reg);
                         self.copy_from_to(src_ptr, return_val_ptr, size);
+                    }
+                    CfgStmt::ScopeExitForFunc => {
                         self.stack_ptr = self.sub(self.stack_ptr, flay.frame_size);
                         return;
                     }
@@ -330,9 +333,64 @@ impl CfgInterpretter {
                         self.output.push_str(&string);
                         self.output.push_str("\n");
                     }
+                    CfgStmt::ScopeExitForBlock {
+                        cond,
+                        block_end,
+                        parent_scope_exit,
+                    } => {
+                        let exit_discrim = self.read_int(self.reg_ptr(&flay, *cond));
+                        jump = Some(match ScopeExitKind::from_int(exit_discrim) {
+                            ScopeExitKind::ExitNormal => block_end,
+                            ScopeExitKind::ExitReturn => parent_scope_exit,
+                            ScopeExitKind::ExitContinue => parent_scope_exit,
+                            ScopeExitKind::ExitBreak => parent_scope_exit,
+                        });
+                        break 'block_loop;
+                    }
+                    CfgStmt::ScopeExitForLoop {
+                        cond,
+                        loop_start,
+                        loop_end,
+                        parent_scope_exit,
+                    } => {
+                        let exit_discrim = self.read_int(self.reg_ptr(&flay, *cond));
+                        jump = Some(match ScopeExitKind::from_int(exit_discrim) {
+                            ScopeExitKind::ExitNormal => loop_start,
+                            ScopeExitKind::ExitReturn => parent_scope_exit,
+                            ScopeExitKind::ExitContinue => loop_start,
+                            ScopeExitKind::ExitBreak => loop_end,
+                        });
+                        break 'block_loop;
+                    }
+                    CfgStmt::Drop { target } => {
+                        let string = self.format_reg(cfg, ctx, func, &flay, *target);
+                        eprintln!("Dropping {}", string);
+                    }
                 }
             }
-            unreachable!("Basic Block didn't end with control flow?!");
+            if let Some(jump) = jump {
+                let src_args = &jump.args;
+                let dest_args = &func.block(jump.block_id).args;
+
+                assert_eq!(src_args.len(), dest_args.len());
+                for (idx, (src_reg, dest_reg)) in src_args.iter().zip(dest_args.iter()).enumerate()
+                {
+                    let src_ptr = self.reg_ptr(&flay, *src_reg);
+                    let dest_ptr = self.reg_ptr(&flay, *dest_reg);
+                    let src_size = self.reg_size(&flay, *src_reg);
+                    let dest_size = self.reg_size(&flay, *dest_reg);
+                    assert_eq!(
+                        src_size, dest_size,
+                        "mismtached jump arg size for arg {}",
+                        idx
+                    );
+                    self.copy_from_to(src_ptr, dest_ptr, src_size);
+                }
+                cur_block = jump.block_id;
+                continue 'eval_loop;
+            } else {
+                unreachable!("Basic Block didn't end with control flow?!");
+            }
         }
     }
 
@@ -408,7 +466,7 @@ impl CfgInterpretter {
         // println!("resolving var path at 0x{:08x}", base_ptr);
         let mut ptr = base_ptr;
         let mut ty = base_ty;
-        let mut size = 0;
+        let mut size = self.layout_of(ctx, base_ty).size_align().size;
         'main: for path_part in var_path {
             match (path_part, self.layout_of(ctx, ty)) {
                 (CfgPathPart::Deref, TyLayout::Primitive(_)) => {
@@ -919,6 +977,7 @@ impl CfgInterpretter {
                                 sub_indent,
                             )?;
                         }
+                        writeln!(f, "")?;
                     } else {
                         unreachable!("func captures weren't a tuple?");
                     }

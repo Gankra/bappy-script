@@ -12,59 +12,86 @@ expression: cfg
 
 #fn5_main():
   bb0():
-    %0 = Bool(true)
-    %1 = Int(3)
-    %2 = stack_alloc() (slot 0)
-    %2.* = %1
-    jmp bb1()
+    %1 = Bool(true)
+    %2 = Int(3)
+    %3 = stack_alloc() (slot 0)
+    %3.* = %2
+    jmp bb2()
 
-  bb1():
-    %3 = %2.*
-    %4 = Int(0)
-    %5 = #fn3_eq(%3, %4)
-    cond %5: bb3(), bb4()
+  bb1(%0):
+    stack_dealloc(3)
+    ret
 
   bb2():
-    %13 = Int(0)
-    ret %13
+    %5 = %3.*
+    %6 = Int(0)
+    %7 = #fn3_eq(%5, %6)
+    cond %7: bb5(), bb7()
 
   bb3():
-    jmp bb2()
-    jmp bb5()
+    %26 = Int(0)
+    *ret = %26
+    %27 = Int(1)
+    jmp bb1(%27)
 
-  bb4():
-    jmp bb5()
+  bb4(%4):
+    loop? %4: continue(bb2()), break(bb3()), parent(bb1(%4))
 
   bb5():
-    %6 = %2.*
-    %7 = Int(1)
-    %8 = #fn1_sub(%6, %7)
-    %2.* = %8
-    %9 = %2.*
-    print %9
-    jmp bb6()
+    %9 = Int(3)
+    jmp bb6(%9)
 
-  bb6():
-    %10 = Str("hello")
-    print %10
-    cond %0: bb8(), bb9()
+  bb6(%8):
+    exit? %8: end(bb9()), parent(bb4(%8))
 
   bb7():
-    %12 = Str("looped!")
-    print %12
-    jmp bb1()
+    %11 = Int(0)
+    jmp bb8(%11)
 
-  bb8():
-    jmp bb7()
-    jmp bb10()
+  bb8(%10):
+    exit? %10: end(bb9()), parent(bb4(%10))
 
   bb9():
-    jmp bb6()
+    %12 = %3.*
+    %13 = Int(1)
+    %14 = #fn1_sub(%12, %13)
+    %3.* = %14
+    %15 = %3.*
+    print %15
     jmp bb10()
 
   bb10():
-    %11 = Str("unreachable")
-    print %11
-    jmp bb6()
+    %17 = Str("hello")
+    print %17
+    cond %1: bb13(), bb15()
+
+  bb11():
+    %24 = Str("looped!")
+    print %24
+    %25 = Int(0)
+    jmp bb4(%25)
+
+  bb12(%16):
+    loop? %16: continue(bb10()), break(bb11()), parent(bb4(%16))
+
+  bb13():
+    %19 = Int(3)
+    jmp bb14(%19)
+
+  bb14(%18):
+    exit? %18: end(bb17()), parent(bb12(%18))
+
+  bb15():
+    %21 = Int(2)
+    jmp bb16(%21)
+
+  bb16(%20):
+    exit? %20: end(bb17()), parent(bb12(%20))
+
+  bb17():
+    %22 = Str("unreachable")
+    print %22
+    %23 = Int(0)
+    jmp bb12(%23)
 
 

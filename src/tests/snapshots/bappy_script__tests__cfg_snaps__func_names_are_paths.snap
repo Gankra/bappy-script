@@ -1,6 +1,6 @@
 ---
 source: src/tests/cfg_snaps.rs
-assertion_line: 118
+assertion_line: 117
 expression: cfg
 
 ---
@@ -22,42 +22,68 @@ expression: cfg
 
 #fn5_main():
   bb0():
-    %0 = Int(5)
-    %1 = (%0,)
-    %2 = heap_alloc()
-    %2.* = %1
-    %3 = [closure](#fn7_captured_do_a_compy, %2)
-    %4 = #fn6_do_a_compy
-    %5 = Int(7)
-    %6 = #struct0_MyClosure{ 0: %4, 1: %5 }
-    %7 = Int(9)
-    %8 = #struct1_MyClosure{ 0: %3, 1: %7 }
-    %9 = #fn8_call_closure(%6)
-    print %9
-    %10 = #fn8_call_closure(%8)
-    print %10
-    %11 = %8.1
-    ret %11
+    %1 = Int(5)
+    %2 = (%1,)
+    %3 = heap_alloc()
+    %3.* = %2
+    %4 = [closure](#fn7_captured_do_a_compy, %3)
+    %5 = #fn6_do_a_compy
+    %6 = Int(7)
+    %7 = #struct0_MyClosure{ 0: %5, 1: %6 }
+    %8 = %4
+    %9 = Int(9)
+    %10 = #struct1_MyClosure{ 0: %8, 1: %9 }
+    %11 = %7
+    %12 = #fn8_call_closure(%11)
+    print %12
+    %13 = %10
+    %14 = #fn8_call_closure(%13)
+    print %14
+    %15 = %10.1
+    *ret = %15
+    %16 = Int(1)
+    jmp bb1(%16)
+
+  bb1(%0):
+    drop %10
+    drop %7
+    drop %4
+    ret
 
 
 #fn6_do_a_compy(%0_x: Int):
   bb0(%0):
-    %1 = #fn2_mul(%0, %0)
-    ret %1
+    %2 = #fn2_mul(%0, %0)
+    *ret = %2
+    %3 = Int(1)
+    jmp bb1(%3)
+
+  bb1(%1):
+    ret
 
 
-#fn7_captured_do_a_compy(%0_x: Int, %4_[closure]: &(Int,)):
-  bb0(%0, %4):
-    %1 = %4.*.0
-    %2 = #fn0_add(%0, %1)
-    %3 = #fn6_do_a_compy(%2)
-    ret %3
+#fn7_captured_do_a_compy(%0_x: Int, %6_[closure]: &(Int,)):
+  bb0(%0, %6):
+    %2 = %6.*.0
+    %3 = #fn0_add(%0, %2)
+    %4 = #fn6_do_a_compy(%3)
+    *ret = %4
+    %5 = Int(1)
+    jmp bb1(%5)
+
+  bb1(%1):
+    ret
 
 
 #fn8_call_closure(%0_close: MyClosure):
   bb0(%0):
-    %1 = %0.1
-    %2 = (%0.0)(%1)
-    ret %2
+    %2 = %0.1
+    %3 = (%0.0)(%2)
+    *ret = %3
+    %4 = Int(1)
+    jmp bb1(%4)
+
+  bb1(%1):
+    ret
 
 

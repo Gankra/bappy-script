@@ -95,6 +95,7 @@ pub struct TyCtx<'p> {
     /// TyIdx. This allows you to properly compare nominal types
     /// in the face of shadowing and similar situations.
     pub tys: Vec<Ty<'p>>,
+    pub needs_drop: Vec<bool>,
 
     /// Mappings from structural types we've seen to type indices.
     ///
@@ -126,7 +127,8 @@ pub struct TyCtx<'p> {
 #[derive(Debug)]
 struct CheckEnv<'p> {
     /// The types of variables
-    vars: HashMap<&'p str, Var>,
+    var_map: HashMap<&'p str, usize>,
+    vars: Vec<Var>,
     /// The struct definitions and TyIdx's
     tys: HashMap<&'p str, TyIdx>,
 
@@ -135,6 +137,18 @@ struct CheckEnv<'p> {
     /// This is important for analyzing control flow and captures.
     /// e.g. you need to know what scope a `break` or `continue` refers to.
     block_kind: BlockKind,
+}
+
+impl<'p> CheckEnv<'p> {
+    fn push_var(&mut self, name: &'p str, var: Var) {
+        self.var_map.insert(name, self.vars.len());
+        self.vars.push(var);
+    }
+    /*
+        fn get_var(&str) ->  {
+
+        }
+    */
 }
 
 /// Kinds of blocks, see CheckEnv
@@ -205,7 +219,7 @@ impl Reg {
 }
 
 /// The result of a resolve_var lookup, allowing the value (type) to be set.
-struct ResolvedVar<'a, 'p> {
+struct ResolvedVar<'a> {
     /// How deep the capture was.
     /// 0 = local (no capture)
     /// 1 = captured from parent function
@@ -213,17 +227,16 @@ struct ResolvedVar<'a, 'p> {
     /// ...etc
     capture_depth: usize,
     /// The variable
-    entry: std::collections::hash_map::OccupiedEntry<'a, &'p str, Var>,
+    entry: &'a mut Var,
 }
 
 impl<'p> TyCtx<'p> {
     /// Resolve a variable name (its type) at this point in the program.
-    fn resolve_var<'a>(&'a mut self, var_name: &'p str) -> Option<ResolvedVar<'a, 'p>> {
+    fn resolve_var(&mut self, var_name: &'p str) -> Option<ResolvedVar> {
         // By default we're accessing locals
         let mut capture_depth = 0;
-        use std::collections::hash_map::Entry;
         for env in self.envs.iter_mut().rev() {
-            if let Entry::Occupied(entry) = env.vars.entry(var_name) {
+            if let Some(entry) = env.var_map.get(var_name).map(|&idx| &mut env.vars[idx]) {
                 return Some(ResolvedVar {
                     capture_depth,
                     entry,
@@ -253,12 +266,14 @@ impl<'p> TyCtx<'p> {
                 ident: f.ident,
                 ty: self.memoize_ty(program, &f.ty),
             })
-            .collect();
+            .collect::<Vec<_>>();
         let ty_idx = self.tys.len();
+        let needs_drop = fields.iter().any(|field| self.needs_drop[field.ty]);
         self.tys.push(Ty::NamedStruct(StructTy {
             name: struct_decl.name,
             fields,
         }));
+        self.needs_drop.push(needs_drop);
         self.envs
             .last_mut()
             .unwrap()
@@ -311,7 +326,7 @@ impl<'p> TyCtx<'p> {
                     let arg_tys = arg_ty_names
                         .iter()
                         .map(|arg_ty_name| self.memoize_ty(program, arg_ty_name))
-                        .collect();
+                        .collect::<Vec<_>>();
                     self.memoize_inner(Ty::Tuple(arg_tys))
                 }
                 TyName::Named(name) => {
@@ -340,11 +355,26 @@ impl<'p> TyCtx<'p> {
         if let Some(idx) = self.ty_map.get(&ty) {
             *idx
         } else {
+            let needs_drop = match &ty {
+                Ty::Int => false,
+                Ty::Str => false,
+                Ty::Bool => false,
+                Ty::Box => true,
+                Ty::TypedPtr(_) => false,
+                Ty::Empty => false,
+                Ty::Func { .. } => true,
+                Ty::Tuple(arg_tys) => arg_tys.iter().any(|&ty| self.needs_drop[ty]),
+                Ty::NamedStruct(_) => unreachable!(),
+                Ty::Unknown => false,
+            };
+
             let ty1 = ty.clone();
             let ty2 = ty;
             let idx = self.tys.len();
+
             self.ty_map.insert(ty1, idx);
             self.tys.push(ty2);
+            self.needs_drop.push(needs_drop);
             idx
         }
     }
@@ -429,6 +459,7 @@ impl<'p> Program<'p> {
     pub fn check(&mut self) {
         let mut ctx = TyCtx {
             tys: Vec::new(),
+            needs_drop: Vec::new(),
             ty_map: HashMap::new(),
             envs: Vec::new(),
             is_typed: self.typed,
@@ -454,25 +485,21 @@ impl<'p> Program<'p> {
         ctx.ty_ptr = ctx.memoize_inner(Ty::Box);
 
         // Set up globals (stdlib)
-        let builtins = self
-            .builtins
-            .clone()
-            .iter()
-            .map(|builtin| {
-                let global_ty = ctx.memoize_ty(self, &builtin.ty);
-                let new_global =
-                    cfg.push_global_func(builtin.name, builtin.args.to_owned(), global_ty);
-                // Intrinsics have no bodies, pop them immediately
-                cfg.pop_global_func();
-                (builtin.name, Var::global_func(global_ty, new_global))
-            }) // TODO
-            .collect();
-        let globals = CheckEnv {
-            vars: builtins,
+        let mut globals = CheckEnv {
+            vars: Vec::new(),
+            var_map: HashMap::new(),
             tys: HashMap::new(),
             // Doesn't really matter what this value is for the globals
             block_kind: BlockKind::General,
         };
+        for builtin in self.builtins.clone() {
+            let global_ty = ctx.memoize_ty(self, &builtin.ty);
+            let new_global = cfg.push_global_func(builtin.name, builtin.args.to_owned(), global_ty);
+            // Intrinsics have no bodies, pop them immediately
+            cfg.pop_global_func();
+            globals.push_var(builtin.name, Var::global_func(global_ty, new_global))
+        }
+
         ctx.envs.push(globals);
 
         // We keep capture info separate from the ctx to avoid some borrowing
@@ -517,7 +544,8 @@ impl<'p> Program<'p> {
         // Give the function's arguments their own scope, and register
         // that scope as the "root" of the function (for the purposes of
         // captures).
-        let mut ast_vars = HashMap::new();
+        let mut ast_vars = Vec::new();
+        let mut ast_var_map = HashMap::new();
         let mut arg_regs = Vec::new();
         let mut arg_tys = Vec::new();
         let mut arg_names = Vec::new();
@@ -530,7 +558,8 @@ impl<'p> Program<'p> {
             let ty = ctx.memoize_ty(self, &decl.ty);
             if !self.typed || ty != ctx.ty_unknown {
                 let reg = cfg.push_reg(ty);
-                ast_vars.insert(decl.ident, Var::reg(ty, reg));
+                ast_var_map.insert(decl.ident, ast_vars.len());
+                ast_vars.push(Var::reg(ty, reg));
                 arg_regs.push(reg);
                 arg_tys.push(ty);
                 arg_names.push(decl.ident);
@@ -544,6 +573,7 @@ impl<'p> Program<'p> {
 
         ctx.envs.push(CheckEnv {
             vars: ast_vars,
+            var_map: ast_var_map,
             tys: HashMap::new(),
             block_kind: BlockKind::Func,
         });
@@ -580,7 +610,7 @@ impl<'p> Program<'p> {
         }
 
         // Do the analysis!!
-        self.check_block(
+        let func_exit = self.check_block(
             &mut func.stmts,
             ctx,
             cfg,
@@ -589,6 +619,7 @@ impl<'p> Program<'p> {
             return_ty,
             BlockKind::General,
         );
+        cfg.bb(func_exit).stmts.push(CfgStmt::ScopeExitForFunc);
 
         // Cleanup
         func.captures = captures.pop().unwrap();
@@ -637,6 +668,8 @@ impl<'p> Program<'p> {
     }
 
     /// Analyze/Compile a block of the program (fn body, if, loop, ...).
+    ///
+    /// Returns the exit bb of the scope.
     fn check_block(
         &mut self,
         stmts: &mut [Statement<'p>],
@@ -649,10 +682,15 @@ impl<'p> Program<'p> {
     ) -> BasicBlockIdx {
         // Create a new scope for all the local variables declared in this block.
         ctx.envs.push(CheckEnv {
-            vars: HashMap::new(),
+            var_map: HashMap::new(),
+            vars: Vec::new(),
             tys: HashMap::new(),
             block_kind,
         });
+
+        let scope_exit = cfg.push_basic_block();
+        let scope_exit_discriminant = cfg.push_reg(ctx.ty_int);
+        cfg.bb(scope_exit).args.push(scope_exit_discriminant);
 
         // Now analyze all the statements. We need to:
         //
@@ -683,9 +721,17 @@ impl<'p> Program<'p> {
 
                     self.check_ty(ctx, expr_temp.ty, expected_ty, "`if`", expr.span);
                     let if_bb = cfg.push_basic_block();
-                    self.check_block(stmts, ctx, cfg, if_bb, captures, return_ty, BlockKind::If);
+                    let if_exit = self.check_block(
+                        stmts,
+                        ctx,
+                        cfg,
+                        if_bb,
+                        captures,
+                        return_ty,
+                        BlockKind::If,
+                    );
                     let else_bb = cfg.push_basic_block();
-                    self.check_block(
+                    let else_exit = self.check_block(
                         else_stmts,
                         ctx,
                         cfg,
@@ -709,15 +755,31 @@ impl<'p> Program<'p> {
 
                     let dest_bb = cfg.push_basic_block();
 
-                    cfg.bb(if_bb).stmts.push(CfgStmt::Jump(BasicBlockJmp {
-                        block_id: dest_bb,
-                        args: Vec::new(),
-                    }));
+                    let if_exit_discrim = cfg.bb(if_exit).args[0];
+                    cfg.bb(if_exit).stmts.push(CfgStmt::ScopeExitForBlock {
+                        cond: if_exit_discrim,
+                        block_end: BasicBlockJmp {
+                            block_id: dest_bb,
+                            args: Vec::new(),
+                        },
+                        parent_scope_exit: BasicBlockJmp {
+                            block_id: scope_exit,
+                            args: vec![if_exit_discrim],
+                        },
+                    });
 
-                    cfg.bb(else_bb).stmts.push(CfgStmt::Jump(BasicBlockJmp {
-                        block_id: dest_bb,
-                        args: Vec::new(),
-                    }));
+                    let else_exit_discrim = cfg.bb(else_exit).args[0];
+                    cfg.bb(else_exit).stmts.push(CfgStmt::ScopeExitForBlock {
+                        cond: else_exit_discrim,
+                        block_end: BasicBlockJmp {
+                            block_id: dest_bb,
+                            args: Vec::new(),
+                        },
+                        parent_scope_exit: BasicBlockJmp {
+                            block_id: scope_exit,
+                            args: vec![else_exit_discrim],
+                        },
+                    });
 
                     bb = dest_bb;
                 }
@@ -731,7 +793,7 @@ impl<'p> Program<'p> {
                     }));
 
                     cfg.push_loop(loop_bb, post_loop_bb);
-                    let final_loop_bb = self.check_block(
+                    let loop_exit = self.check_block(
                         stmts,
                         ctx,
                         cfg,
@@ -742,12 +804,22 @@ impl<'p> Program<'p> {
                     );
 
                     // Make the last loop bb jump to the start of the loop
-                    cfg.bb(final_loop_bb)
-                        .stmts
-                        .push(CfgStmt::Jump(BasicBlockJmp {
+                    let loop_exit_discrim = cfg.bb(loop_exit).args[0];
+                    cfg.bb(loop_exit).stmts.push(CfgStmt::ScopeExitForLoop {
+                        cond: loop_exit_discrim,
+                        loop_start: BasicBlockJmp {
                             block_id: loop_bb,
                             args: Vec::new(),
-                        }));
+                        },
+                        loop_end: BasicBlockJmp {
+                            block_id: post_loop_bb,
+                            args: Vec::new(),
+                        },
+                        parent_scope_exit: BasicBlockJmp {
+                            block_id: scope_exit,
+                            args: vec![loop_exit_discrim],
+                        },
+                    });
 
                     cfg.pop_loop();
                     bb = post_loop_bb;
@@ -802,7 +874,7 @@ impl<'p> Program<'p> {
                         Var::reg(func_ty, new_reg)
                     };
 
-                    ctx.envs.last_mut().unwrap().vars.insert(func.name, new_var);
+                    ctx.envs.last_mut().unwrap().push_var(func.name, new_var);
                 }
                 Stmt::Let { name, expr, is_mut } => {
                     let expr_temp = self.check_expr(expr, ctx, cfg, bb, captures);
@@ -839,11 +911,7 @@ impl<'p> Program<'p> {
                         Var::reg(expr_temp.ty, expr_temp.reg)
                     };
 
-                    ctx.envs
-                        .last_mut()
-                        .unwrap()
-                        .vars
-                        .insert(name.ident, new_var);
+                    ctx.envs.last_mut().unwrap().push_var(name.ident, new_var);
                 }
                 Stmt::Set {
                     path: var_path,
@@ -860,7 +928,7 @@ impl<'p> Program<'p> {
                                 *stmt_span,
                             )
                         }
-                        let var = var.entry.get().clone();
+                        let var = var.entry.clone();
                         let dest_reg = if let Var::Alloca { reg, .. } = var {
                             reg
                         } else {
@@ -902,9 +970,21 @@ impl<'p> Program<'p> {
 
                     self.check_ty(ctx, expr_temp.ty, return_ty, "return", expr.span);
 
-                    cfg.bb(bb).stmts.push(CfgStmt::Return {
+                    // Set the return value
+                    cfg.bb(bb).stmts.push(CfgStmt::SetReturn {
                         src_reg: expr_temp.reg,
                     });
+
+                    // "unwind" the function
+                    let exit_mode_reg = cfg.push_reg(ctx.ty_int);
+                    cfg.bb(bb).stmts.push(CfgStmt::Lit {
+                        new_reg: exit_mode_reg,
+                        lit: Literal::Int(ScopeExitKind::ExitReturn as i64),
+                    });
+                    cfg.bb(bb).stmts.push(CfgStmt::Jump(BasicBlockJmp {
+                        block_id: scope_exit,
+                        args: vec![exit_mode_reg],
+                    }));
                 }
                 Stmt::Print { expr } => {
                     let expr_temp = self.check_expr(expr, ctx, cfg, bb, captures);
@@ -937,26 +1017,76 @@ impl<'p> Program<'p> {
                         self.error(format!("Compile Error: This isn't in a loop!"), *stmt_span)
                     }
 
-                    let (loop_bb, post_loop_bb) = cfg.cur_loop();
-
-                    if let Stmt::Break = stmt {
-                        cfg.bb(bb).stmts.push(CfgStmt::Jump(BasicBlockJmp {
-                            block_id: post_loop_bb,
-                            args: Vec::new(),
-                        }));
+                    let exit_mode = if let Stmt::Break = stmt {
+                        ScopeExitKind::ExitBreak
                     } else if let Stmt::Continue = stmt {
-                        cfg.bb(bb).stmts.push(CfgStmt::Jump(BasicBlockJmp {
-                            block_id: loop_bb,
-                            args: Vec::new(),
-                        }));
+                        ScopeExitKind::ExitContinue
                     } else {
                         unreachable!()
-                    }
+                    };
+                    let exit_mode_reg = cfg.push_reg(ctx.ty_int);
+                    cfg.bb(bb).stmts.push(CfgStmt::Lit {
+                        new_reg: exit_mode_reg,
+                        lit: Literal::Int(exit_mode as i64),
+                    });
+                    cfg.bb(bb).stmts.push(CfgStmt::Jump(BasicBlockJmp {
+                        block_id: scope_exit,
+                        args: vec![exit_mode_reg],
+                    }));
                 }
             }
         }
+
+        {
+            let cur_scope = ctx.envs.last().unwrap();
+            for var in cur_scope.vars.iter().rev() {
+                match var {
+                    Var::Alloca { ty, reg } => {
+                        if ctx.needs_drop[*ty] {
+                            println!("alloca dropping %{}", reg.0);
+                            cfg.bb(scope_exit)
+                                .stmts
+                                .push(CfgStmt::Drop { target: *reg });
+                        }
+                        cfg.bb(scope_exit)
+                            .stmts
+                            .push(CfgStmt::StackDealloc { src_reg: *reg })
+                    }
+                    Var::Reg { ty, reg } => {
+                        if ctx.needs_drop[*ty] {
+                            println!("reg dropping %{}", reg.0);
+                            cfg.bb(scope_exit)
+                                .stmts
+                                .push(CfgStmt::Drop { target: *reg });
+                        }
+                    }
+                    Var::GlobalFunc { .. } => {
+                        // Do nothing
+                    }
+                }
+            }
+
+            let needs_fallthrough = cfg
+                .bb(bb)
+                .stmts
+                .last()
+                .map(|stmt| !matches!(stmt, CfgStmt::Jump(..)))
+                .unwrap_or(true);
+            if needs_fallthrough {
+                let exit_mode_reg = cfg.push_reg(ctx.ty_int);
+                cfg.bb(bb).stmts.push(CfgStmt::Lit {
+                    new_reg: exit_mode_reg,
+                    lit: Literal::Int(ScopeExitKind::ExitNormal as i64),
+                });
+                cfg.bb(bb).stmts.push(CfgStmt::Jump(BasicBlockJmp {
+                    block_id: scope_exit,
+                    args: vec![exit_mode_reg],
+                }));
+            }
+        }
+
         ctx.envs.pop();
-        bb
+        scope_exit
     }
 
     fn check_expr(
@@ -1223,7 +1353,7 @@ NOTE: the types look the same, but the named types have different decls!"#,
     ) -> Reg {
         if let Some(var) = ctx.resolve_var(var_path.ident) {
             let capture_depth = var.capture_depth;
-            let mut src_var = var.entry.get().clone();
+            let mut src_var = var.entry.clone();
             let is_global_func = matches!(src_var, Var::GlobalFunc { .. });
 
             // Don't capture global function pointers
@@ -1251,10 +1381,11 @@ NOTE: the types look the same, but the named types have different decls!"#,
                 return Reg::new(ctx.ty_unknown, RegIdx(0));
             }
 
-            let needs_temp = src_var.needs_temp() || !var_path.fields.is_empty();
+            let has_path = !var_path.fields.is_empty();
             let is_alloca = matches!(src_var, Var::Alloca { .. });
             let (final_ty, var_path) =
                 self.resolve_var_path(ctx, src_var.ty(), &var_path.fields, is_alloca, span);
+            let needs_temp = src_var.needs_temp() || has_path || ctx.needs_drop[final_ty];
 
             match src_var {
                 Var::Alloca { reg, ty } | Var::Reg { reg, ty } => {
@@ -1300,7 +1431,7 @@ NOTE: the types look the same, but the named types have different decls!"#,
     ) -> (CfgVarPath, TyIdx) {
         if let Some(var) = ctx.resolve_var(var_path.ident) {
             let capture_depth = var.capture_depth;
-            let mut src_var = var.entry.get().clone();
+            let mut src_var = var.entry.clone();
             let is_global_func = matches!(src_var, Var::GlobalFunc { .. });
 
             // Don't capture global function pointers
@@ -1328,10 +1459,11 @@ NOTE: the types look the same, but the named types have different decls!"#,
                 return (CfgVarPath::Reg(RegIdx(0), Vec::new()), ctx.ty_unknown);
             }
 
-            let _needs_temp = src_var.needs_temp() || !var_path.fields.is_empty();
+            let has_path = !var_path.fields.is_empty();
             let is_alloca = matches!(src_var, Var::Alloca { .. });
             let (final_ty, var_path) =
                 self.resolve_var_path(ctx, src_var.ty(), &var_path.fields, is_alloca, span);
+            let _needs_temp = src_var.needs_temp() || has_path || ctx.needs_drop[final_ty];
 
             match src_var {
                 Var::Alloca { reg, .. } | Var::Reg { reg, .. } => {
@@ -1397,6 +1529,26 @@ pub struct BasicBlockJmp {
     pub args: Vec<RegIdx>,
 }
 
+#[repr(i64)]
+pub enum ScopeExitKind {
+    ExitNormal = 0,
+    ExitReturn = 1,
+    ExitContinue = 2,
+    ExitBreak = 3,
+}
+
+impl ScopeExitKind {
+    pub fn from_int(val: i64) -> Self {
+        match val {
+            0 => Self::ExitNormal,
+            1 => Self::ExitReturn,
+            2 => Self::ExitContinue,
+            3 => Self::ExitBreak,
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum CfgStmt<'p> {
     Branch {
@@ -1405,6 +1557,33 @@ pub enum CfgStmt<'p> {
         else_block: BasicBlockJmp,
     },
     Jump(BasicBlockJmp),
+    /// To exit a normal block, you must pass through
+    /// this instruction which decides whether to
+    /// fallthrough or bubble to the parent scope exit.
+    ScopeExitForBlock {
+        cond: RegIdx,
+        // Where to jump for fallthrough
+        block_end: BasicBlockJmp,
+        // Where to jump for break/continue/return
+        parent_scope_exit: BasicBlockJmp,
+    },
+    /// To exit a loop, you must pass through
+    /// this instruction which decides whether to
+    /// break, continue, or bubble to the parent scope exit
+    ScopeExitForLoop {
+        cond: RegIdx,
+        // Where to jump for `continue`
+        loop_start: BasicBlockJmp,
+        // Where to jump for `break`
+        loop_end: BasicBlockJmp,
+        // Where to jump for `return`
+        parent_scope_exit: BasicBlockJmp,
+    },
+    /// *truly* return from the function (assumes return value already set)
+    ScopeExitForFunc,
+    Drop {
+        target: RegIdx,
+    },
     Copy {
         new_reg: RegIdx,
         src_var: CfgVarPath,
@@ -1450,7 +1629,7 @@ pub enum CfgStmt<'p> {
         dest_var: CfgVarPath,
         src_reg: RegIdx,
     },
-    Return {
+    SetReturn {
         src_reg: RegIdx,
     },
     Print {
@@ -1764,8 +1943,8 @@ impl<'p> FuncCfg<'p> {
                             panic!("Internal Compiler Error: set a global function?");
                         }
                     }
-                    CfgStmt::Return { src_reg } => {
-                        writeln!(f, "    ret %{}", src_reg.0)?;
+                    CfgStmt::SetReturn { src_reg } => {
+                        writeln!(f, "    *ret = %{}", src_reg.0)?;
                     }
                     CfgStmt::Print { src_reg } => {
                         writeln!(f, "    print %{}", src_reg.0)?;
@@ -1806,6 +1985,39 @@ impl<'p> FuncCfg<'p> {
                         } else {
                             panic!("Internal Compiler Error: struct wasn't a struct?");
                         }
+                    }
+                    CfgStmt::ScopeExitForBlock {
+                        cond,
+                        block_end,
+                        parent_scope_exit,
+                    } => {
+                        write!(f, "    exit? %{}: end(", cond.0)?;
+                        block_end.format(f)?;
+                        write!(f, "), parent(")?;
+                        parent_scope_exit.format(f)?;
+                        write!(f, ")")?;
+                        writeln!(f)?;
+                    }
+                    CfgStmt::ScopeExitForLoop {
+                        cond,
+                        loop_start,
+                        loop_end,
+                        parent_scope_exit,
+                    } => {
+                        write!(f, "    loop? %{}: continue(", cond.0)?;
+                        loop_start.format(f)?;
+                        write!(f, "), break(")?;
+                        loop_end.format(f)?;
+                        write!(f, "), parent(")?;
+                        parent_scope_exit.format(f)?;
+                        write!(f, ")")?;
+                        writeln!(f)?;
+                    }
+                    CfgStmt::ScopeExitForFunc => {
+                        writeln!(f, "    ret")?;
+                    }
+                    CfgStmt::Drop { target } => {
+                        writeln!(f, "    drop %{}", target.0)?;
                     }
                 }
             }

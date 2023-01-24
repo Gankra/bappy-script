@@ -7,9 +7,24 @@ on:
     branches: [ "main" ]
 
 env:
+  RUSTFLAGS: -Dwarnings
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          components: rustfmt
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
   build:
 
     runs-on: ubuntu-latest

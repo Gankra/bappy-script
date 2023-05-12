@@ -13,7 +13,7 @@ license = "MIT OR Apache-2.0"
 nom = "7.1.0"
 
 [dev-dependencies]
-insta = "*"
+insta = "1.29.0"
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

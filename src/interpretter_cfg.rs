@@ -130,7 +130,7 @@ impl<'p> Program<'p> {
         // Read main's return value
         self.cfg = Some(cfg);
         self.ctx = Some(ctx);
-        self.output = Some(std::mem::replace(&mut interp.output, String::new()));
+        self.output = Some(std::mem::take(&mut interp.output));
         interp.read_int(main_return_val_ptr)
     }
 }
@@ -230,7 +230,7 @@ impl CfgInterpretter {
                         let dest_ptr = self.reg_ptr(&flay, *new_reg);
                         match lit {
                             Literal::Int(val) => self.write_int(dest_ptr, *val),
-                            Literal::Str(val) => self.write_str(dest_ptr, *val),
+                            Literal::Str(val) => self.write_str(dest_ptr, val),
                             Literal::Bool(val) => self.write_bool(dest_ptr, *val),
                             Literal::Empty(()) => { /* noop */ }
                         }
@@ -331,7 +331,7 @@ impl CfgInterpretter {
                         println!("{}", string);
 
                         self.output.push_str(&string);
-                        self.output.push_str("\n");
+                        self.output.push('\n');
                     }
                     CfgStmt::ScopeExitForBlock {
                         cond,
@@ -958,12 +958,12 @@ impl CfgInterpretter {
                         (captures_ty, captures_layout)
                     {
                         let indent = indent + 2;
-                        writeln!(f, "")?;
+                        writeln!(f)?;
                         write!(f, "{:indent$}captures:", "", indent = indent)?;
                         for (capture_ty, capture_layout) in arg_tys.iter().zip(layout.fields.iter())
                         {
                             let capture_ptr = self.add(captures, capture_layout.offset);
-                            writeln!(f, "")?;
+                            writeln!(f)?;
                             let sub_indent = indent + 2;
                             write!(f, "{:indent$}- ", "", indent = indent)?;
                             // Debug print captures unconditionally to make 0 vs "0" clear
@@ -977,7 +977,7 @@ impl CfgInterpretter {
                                 sub_indent,
                             )?;
                         }
-                        writeln!(f, "")?;
+                        writeln!(f)?;
                     } else {
                         unreachable!("func captures weren't a tuple?");
                     }

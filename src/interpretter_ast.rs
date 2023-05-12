@@ -73,7 +73,7 @@ impl<'p> Program<'p> {
             int
         } else {
             self.error(
-                format!("Runtime Error: main must evaluate to an int!"),
+                "Runtime Error: main must evaluate to an int!".to_string(),
                 self.cur_eval_span,
             )
         }
@@ -121,11 +121,11 @@ impl<'p> Program<'p> {
         match result {
             ControlFlow::Return(val) => val,
             ControlFlow::Break => self.error(
-                format!("Runtime Error: break used outside of a loop"),
+                "Runtime Error: break used outside of a loop".to_string(),
                 self.cur_eval_span,
             ),
             ControlFlow::Continue => self.error(
-                format!("Runtime Error: continue used outside of a loop"),
+                "Runtime Error: continue used outside of a loop".to_string(),
                 self.cur_eval_span,
             ),
             ControlFlow::None => self.error(
@@ -305,9 +305,9 @@ impl<'p> Program<'p> {
             }
             Expr::Lit(lit) => match lit {
                 Literal::Int(val) => Val::Int(*val),
-                Literal::Str(val) => Val::Str(*val),
+                Literal::Str(val) => Val::Str(val),
                 Literal::Bool(val) => Val::Bool(*val),
-                Literal::Empty(val) => Val::Empty(*val),
+                Literal::Empty(_val) => Val::Empty(()),
             },
         }
     }
@@ -388,7 +388,7 @@ impl<'p> Program<'p> {
 
         if let Some(output) = self.output.as_mut() {
             output.push_str(&string);
-            output.push_str("\n");
+            output.push('\n');
         }
     }
 
@@ -407,9 +407,7 @@ impl<'p> Program<'p> {
             Val::Bool(boolean) => {
                 format!("{}", boolean)
             }
-            Val::Empty(_) => {
-                format!("()")
-            }
+            Val::Empty(_) => "()".to_string(),
             Val::Tuple(tuple) => {
                 let mut f = String::new();
                 write!(f, "(").unwrap();
@@ -453,7 +451,7 @@ impl<'p> Program<'p> {
                     let indent = indent + 2;
                     write!(f, "{:indent$}captures:", "", indent = indent).unwrap();
                     for (arg, capture) in &closure.captures {
-                        writeln!(f, "").unwrap();
+                        writeln!(f).unwrap();
                         let sub_indent = indent + arg.len() + 2;
                         // Debug print captures unconditionally to make 0 vs "0" clear
                         let val = self.format_val(capture, true, sub_indent);

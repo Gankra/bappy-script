@@ -401,12 +401,12 @@ impl<'p> TyCtx<'p> {
     /// Stringify a type.
     pub fn format_ty(&self, ty: TyIdx) -> String {
         match self.realize_ty(ty) {
-            Ty::Int => format!("Int"),
-            Ty::Str => format!("Str"),
-            Ty::Bool => format!("Bool"),
-            Ty::Empty => format!("()"),
-            Ty::Unknown => format!("<unknown>"),
-            Ty::Box => format!("Box"),
+            Ty::Int => "Int".to_string(),
+            Ty::Str => "Str".to_string(),
+            Ty::Bool => "Bool".to_string(),
+            Ty::Empty => "()".to_string(),
+            Ty::Unknown => "<unknown>".to_string(),
+            Ty::Box => "Box".to_string(),
             Ty::TypedPtr(pointee_ty) => {
                 let pointee = self.format_ty(*pointee_ty);
                 format!("&{}", pointee)
@@ -515,7 +515,7 @@ impl<'p> Program<'p> {
 
         if ctx.envs.len() != 1 {
             self.error(
-                format!("Internal Compiler Error: scopes were improperly popped"),
+                "Internal Compiler Error: scopes were improperly popped".to_string(),
                 Span {
                     start: addr(self.input),
                     end: addr(self.input),
@@ -565,7 +565,7 @@ impl<'p> Program<'p> {
                 arg_names.push(decl.ident);
             } else {
                 self.error(
-                    format!("Compile Error: function arguments must have types"),
+                    "Compile Error: function arguments must have types".to_string(),
                     decl.span,
                 )
             }
@@ -626,11 +626,7 @@ impl<'p> Program<'p> {
 
         let captures_ty = if !func.captures.is_empty() {
             // TODO: properly type the captures
-            let arg_tys = func
-                .captures
-                .iter()
-                .map(|(_cap_name, cap)| cap.ty)
-                .collect();
+            let arg_tys = func.captures.values().map(|cap| cap.ty).collect();
             let captures_ty = ctx.memoize_inner(Ty::Tuple(arg_tys));
             let captures_ptr_ty = ctx.memoize_inner(Ty::TypedPtr(captures_ty));
             let captures_arg_reg = cfg.push_reg(captures_ptr_ty);
@@ -1014,7 +1010,10 @@ impl<'p> Program<'p> {
                     }
 
                     if !found_loop {
-                        self.error(format!("Compile Error: This isn't in a loop!"), *stmt_span)
+                        self.error(
+                            "Compile Error: This isn't in a loop!".to_string(),
+                            *stmt_span,
+                        )
                     }
 
                     let exit_mode = if let Stmt::Break = stmt {
@@ -1105,10 +1104,10 @@ impl<'p> Program<'p> {
                     new_reg,
                     lit: lit.clone(),
                 });
-                return Reg::new(ty, new_reg);
+                Reg::new(ty, new_reg)
             }
             Expr::VarPath(var_path) => {
-                return self.get_var_path_as_reg(ctx, cfg, var_path, captures, bb, expr.span);
+                self.get_var_path_as_reg(ctx, cfg, var_path, captures, bb, expr.span)
             }
             Expr::Tuple(args) => {
                 let mut arg_regs = Vec::new();
@@ -1126,7 +1125,7 @@ impl<'p> Program<'p> {
                     new_reg,
                     args: arg_regs,
                 });
-                return Reg::new(ty, new_reg);
+                Reg::new(ty, new_reg)
             }
             Expr::Named { name, args } => {
                 if let Some(ty_idx) = ctx.resolve_nominal_ty(name) {
@@ -1206,10 +1205,10 @@ impl<'p> Program<'p> {
 
                 let func_ty = ctx.realize_ty(func_ty_idx).clone();
                 let (arg_tys, return_ty) = if let Ty::Func { arg_tys, return_ty } = func_ty {
-                    (arg_tys.clone(), return_ty)
+                    (arg_tys, return_ty)
                 } else if self.typed {
                     self.error(
-                        format!("Compile Error: Function call must have Func type!"),
+                        "Compile Error: Function call must have Func type!".to_string(),
                         expr.span,
                     )
                 } else {
@@ -1242,7 +1241,7 @@ impl<'p> Program<'p> {
                     func_ty: func_ty_idx,
                     args: arg_regs,
                 });
-                return Reg::new(return_ty, new_reg);
+                Reg::new(return_ty, new_reg)
             }
         }
     }
@@ -1395,9 +1394,9 @@ NOTE: the types look the same, but the named types have different decls!"#,
                             new_reg,
                             src_var: CfgVarPath::Reg(reg, var_path),
                         });
-                        return Reg::new(final_ty, new_reg);
+                        Reg::new(final_ty, new_reg)
                     } else {
-                        return Reg::new(ty, reg);
+                        Reg::new(ty, reg)
                     }
                 }
                 Var::GlobalFunc { global_func, .. } => {
@@ -1406,7 +1405,7 @@ NOTE: the types look the same, but the named types have different decls!"#,
                         new_reg,
                         src_var: CfgVarPath::GlobalFunc(global_func),
                     });
-                    return Reg::new(final_ty, new_reg);
+                    Reg::new(final_ty, new_reg)
                 }
             }
         } else {

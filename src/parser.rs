@@ -214,7 +214,7 @@ impl<'p> Program<'p> {
 
         if !matches!(terminal, Item::End) {
             self.error(
-                format!("Parse Error: `fn` ending eith an `else`"),
+                "Parse Error: `fn` ending eith an `else`".to_string(),
                 Span {
                     start: addr(i),
                     end: addr(i),
@@ -260,7 +260,7 @@ impl<'p> Program<'p> {
 
                     if !matches!(terminal, Item::End) {
                         self.error(
-                            format!("Parse Error: `fn` ending with an `else`"),
+                            "Parse Error: `fn` ending with an `else`".to_string(),
                             Span {
                                 start: addr(i),
                                 end: addr(i),
@@ -292,7 +292,7 @@ impl<'p> Program<'p> {
 
                         if !matches!(terminal, Item::End) {
                             self.error(
-                                format!("Parse Error: `else` ending with an `else`"),
+                                "Parse Error: `else` ending with an `else`".to_string(),
                                 Span {
                                     start: addr(i),
                                     end: addr(i),
@@ -316,7 +316,7 @@ impl<'p> Program<'p> {
 
                     if !matches!(terminal, Item::End) {
                         self.error(
-                            format!("Parse Error: `loop` ending with an `else`"),
+                            "Parse Error: `loop` ending with an `else`".to_string(),
                             Span {
                                 start: addr(i),
                                 end: addr(i),
@@ -756,7 +756,7 @@ fn ty_ref_tuple(i: &str) -> IResult<&str, TyName> {
     Ok((i, TyName::Tuple(tys)))
 }
 fn ty_ref_named(i: &str) -> IResult<&str, TyName> {
-    map(ident, |name| TyName::Named(name))(i)
+    map(ident, TyName::Named)(i)
 }
 
 fn struct_item(i: &str) -> IResult<&str, StructItem> {

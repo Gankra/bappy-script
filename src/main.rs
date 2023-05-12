@@ -1,3 +1,10 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::for_kv_map)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::enum_variant_names)]
+#![allow(dead_code)]
+#![allow(clippy::only_used_in_recursion)]
+
 use checker::*;
 use interpretter_ast::*;
 use interpretter_cfg::*;
@@ -190,9 +197,9 @@ impl<'p> Program<'p> {
                 start_col + 1
             };
 
-            eprintln!("");
+            eprintln!();
             eprintln!("{} @ program.bappy:{}:{}", message, line_number, start_col);
-            eprintln!("");
+            eprintln!();
             for i in line_number.saturating_sub(2)..=line_number {
                 let (_, line) = self.input_lines[i];
                 eprintln!("{:>4} |{}", i, line);
@@ -206,9 +213,9 @@ impl<'p> Program<'p> {
             eprintln!();
             eprintln!();
         } else {
-            eprintln!("");
+            eprintln!();
             eprintln!("{}", message);
-            eprintln!("");
+            eprintln!();
         }
 
         panic!("{}", message);
